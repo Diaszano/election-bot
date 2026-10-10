@@ -1,0 +1,9 @@
+.git
+.superpowers
+.agents
+.codex
+.aws
+.env
+bin
+data
+*.db*

@@ -1,0 +1,32 @@
+services:
+  election-bot:
+    image: election-bot
+    build: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATA_SOURCE_MODE: ${DATA_SOURCE_MODE:-simulation}
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SQLITE_PATH: /data/elections.db
+      HTTP_LISTEN_ADDRESS: ':8080'
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+    volumes:
+      - election-data:/data
+    ports:
+      - '127.0.0.1:8080:8080'
+    networks: [elections]
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      test: [CMD, /election-bot, --healthcheck]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+volumes:
+  election-data:
+networks:
+  elections:
