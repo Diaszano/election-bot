@@ -133,3 +133,11 @@ README documents BotFather, commands, environment variables, local/Docker runs, 
 No web UI, subscriber preference commands, PostgreSQL, distributed locking, multiple replicas or broker. SQLite and single-process scheduling bound horizontal scaling. Initial notification throughput is deliberately bounded; lag is observable through the outbox. External API uncertainty is explicit and official mode never falls back to synthetic data.
 
 This specification and its companion implementation plan are submitted together because the user explicitly requested both for final review. That instruction authorizes document preparation, not product implementation. Final approval and selection of an execution method precede source code, dependencies and infrastructure creation.
+
+## Approved refinements (2026-10-10)
+
+Native execution in the current workspace is authorized. Official simulation JSON and EA11 configuration at the user-provided URLs are captured verbatim with provenance and SHA-256 digests. Election 21270 is first-round simulation, never evidence of runoff winner semantics. Production mode remains fail-closed while the required EA20 specification/status mapping is unavailable.
+
+Snapshot precedence uses publication timestamp first, generation timestamp second. `idg` is opaque. Older publication/generation timestamps are rejected; newer valid corrections are accepted even with decreased votes/progress. Equal timestamps and identical generation IDs require identical semantic contents; contradictions are rejected. Equal timestamps with distinct IDs and differing contents are quarantined as ambiguous rather than ordered lexically. An equal-timestamp semantically identical response may refresh representation validators. Persist every accepted 200 representation/validator atomically, including unchanged results, so restart/304 validation references committed data. Rejected stale/ambiguous payloads never advance validators.
+
+Only private Telegram conversations may subscribe; groups/channels are ignored. Repeated `/start` on an active subscription preserves baseline and generation. New/reactivated subscriptions alone establish a baseline; prior delivered milestones remain deduplicated.

@@ -1,0 +1,32 @@
+rule_files: [alerts.yaml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'election_counting_active{service_name="election-bot"}'
+        values: '0+0x20'
+      - series: 'election_last_success_timestamp_seconds{service_name="election-bot"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ElectionPollingFailure
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ElectionDataStale
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'election_counting_active{service_name="election-bot"}'
+        values: '1+0x20'
+      - series: 'election_poll_consecutive_failures{service_name="election-bot"}'
+        values: '1+0x20'
+      - series: 'election_last_success_timestamp_seconds{service_name="election-bot"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ElectionPollingFailure
+        exp_alerts:
+          - exp_labels: {service_name: election-bot, severity: warning}
+            exp_annotations:
+              summary: Election polling has not synchronized
+              description: Check the TSE cooldown and endpoint provenance before retrying.

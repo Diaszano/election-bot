@@ -1,0 +1,63 @@
+services:
+  election-bot:
+    environment:
+      OTEL_ENABLED: 'true'
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    command: ['--config=/etc/otelcol/config.yaml']
+    volumes: ['./deployments/otel/collector.yaml:/etc/otelcol/config.yaml:ro']
+    ports: ['127.0.0.1:4317:4317', '127.0.0.1:8889:8889']
+    networks: [elections]
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    command: ['--config.file=/etc/prometheus/prometheus.yaml', '--storage.tsdb.retention.time=7d']
+    volumes:
+      - ./deployments/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    ports: ['127.0.0.1:9090:9090']
+    networks: [elections]
+    restart: unless-stopped
+  tempo:
+    image: grafana/tempo:3.1.0
+    command: ['-config.file=/etc/tempo.yaml']
+    volumes:
+      - ./deployments/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports: ['127.0.0.1:3200:3200']
+    networks: [elections]
+    restart: unless-stopped
+  loki:
+    image: grafana/loki:3.7.8
+    command: ['-config.file=/etc/loki/loki.yaml']
+    volumes:
+      - ./deployments/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports: ['127.0.0.1:3100:3100']
+    networks: [elections]
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:13.2.3
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - ./deployments/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deployments/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ['127.0.0.1:3000:3000']
+    networks: [elections]
+    restart: unless-stopped
+  blackbox:
+    image: prom/blackbox-exporter:v0.29.0
+    command: ['--config.file=/etc/blackbox.yaml']
+    volumes: ['./deployments/prometheus/blackbox.yaml:/etc/blackbox.yaml:ro']
+    networks: [elections]
+    restart: unless-stopped
+volumes:
+  prometheus-data:
+  tempo-data:
+  loki-data:
+  grafana-data:

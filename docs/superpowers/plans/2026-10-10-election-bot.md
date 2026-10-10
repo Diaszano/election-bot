@@ -224,3 +224,7 @@ Split these into small interfaces where consumed; Store implements them all. Def
 The user has requested specification and plan preparation for final review, not selected an execution method. Recommend **Native** implementation in this session: tasks depend closely on shared domain and persistence contracts, and this keeps the interface decisions in one context. An independent whole-branch review follows. **Subagent-driven** execution is available if the user prefers independent per-task implementation/review at additional context cost. Do not spawn agents before the user chooses.
 
 Self-review completed: every design section maps to a task; the five review-focus cases have explicit tests; cache-validator commit, pending-revision acknowledgement, subscription generation and transient retry retention share consistent persistence contracts. Official schema verification and live Docker telemetry remain explicit execution gates, not guessed successes.
+
+## Approved execution refinements
+
+Native execution selected. Task 1 captures the official first-round simulation artifacts with hashes. Tasks 2/3/6 test opaque IDs, stale CDN payloads, timestamp ties/ambiguity, corrections and atomic validator refresh for unchanged 200s across restart/304. Task 5 ignores non-private subscription requests and tests repeated active `/start` preserving baseline/generation. Current-workspace execution is authorized; use a feature branch in place.
