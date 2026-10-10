@@ -235,3 +235,16 @@ func (s *Store) SetOffset(ctx context.Context, o int64) error {
 	_, e := s.db.ExecContext(ctx, "UPDATE command_offset SET value=max(value,?) WHERE id=1", o)
 	return e
 }
+
+func (s *Store) Statistics(ctx context.Context) (subscribers, pending int64, oldest time.Time, err error) {
+	err = s.db.QueryRowContext(ctx, "SELECT count(*) FROM subscriptions WHERE active=1").Scan(&subscribers)
+	if err != nil {
+		return
+	}
+	var due sql.NullInt64
+	err = s.db.QueryRowContext(ctx, "SELECT count(*),min(due) FROM outbox WHERE state='pending'").Scan(&pending, &due)
+	if due.Valid {
+		oldest = time.Unix(0, due.Int64)
+	}
+	return
+}

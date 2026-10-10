@@ -12,10 +12,10 @@ import (
 	telegramapi "github.com/Diaszano/election-bot/internal/adapters/outbound/telegram"
 	"github.com/Diaszano/election-bot/internal/application/ports"
 	"github.com/Diaszano/election-bot/internal/application/usecases"
+	"github.com/Diaszano/election-bot/internal/domain/election"
 	"github.com/Diaszano/election-bot/internal/platform/config"
-	"log/slog"
+	"github.com/Diaszano/election-bot/internal/platform/observability"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 )
@@ -23,14 +23,44 @@ import (
 func Run(parent context.Context, c config.Config) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	level := slog.LevelInfo
-	_ = level.UnmarshalText([]byte(c.LogLevel))
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	telemetry, e := observability.Setup(ctx, c, "dev")
+	if e != nil {
+		return e
+	}
+	logger := telemetry.Logger
 	db, e := sqlite.Open(ctx, c.Database)
 	if e != nil {
 		return e
 	}
-	defer db.Close()
+	defer func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), c.ShutdownTimeout)
+		defer cancel()
+		if e := telemetry.Shutdown(shutdown); e != nil {
+			logger.Warn("telemetry shutdown incomplete")
+		}
+		db.Close()
+	}()
+
+	if e = observability.RegisterState(func(ctx context.Context) (v observability.Values, e error) {
+		status, e := db.Status(ctx)
+		if e != nil {
+			return v, e
+		}
+		v.LastSuccess = status.LastSuccess
+		snapshot, e := db.Latest(ctx)
+		if e != nil && !errors.Is(e, ports.ErrNoSnapshot) {
+			return v, e
+		}
+		v.Published = snapshot.Snapshot.Published
+		v.Progress = snapshot.Snapshot.Progress.Ratio()
+		v.ValidVotes = snapshot.Snapshot.Valid
+		v.Counting = snapshot.Snapshot.Status == election.Counting
+		v.Subscribers, v.Pending, v.OldestPending, e = db.Statistics(ctx)
+		return v, e
+	}); e != nil {
+		logger.Warn("state metrics initialization failed")
+	}
+
 	var sender ports.NotificationSender = &RecordingSender{}
 	var api *telegramapi.Client
 	username := ""

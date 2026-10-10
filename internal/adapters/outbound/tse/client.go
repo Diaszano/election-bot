@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/Diaszano/election-bot/internal/application/ports"
+	"github.com/Diaszano/election-bot/internal/application/services"
 	"github.com/Diaszano/election-bot/internal/domain/election"
 	"io"
 	"math"
@@ -26,7 +27,9 @@ type Provider struct {
 func New(c *http.Client, url string, id election.Identity, l *time.Location) *Provider {
 	return &Provider{c, url, id, l}
 }
-func (p *Provider) Fetch(ctx context.Context, v ports.Validators) (ports.FetchResult, error) {
+func (p *Provider) Fetch(ctx context.Context, v ports.Validators) (result ports.FetchResult, err error) {
+	ctx, finish := services.Operation(ctx, "tse.fetch_results")
+	defer func() { finish(err) }()
 	var out ports.FetchResult
 	req, e := http.NewRequestWithContext(ctx, "GET", p.url, nil)
 	if e != nil {

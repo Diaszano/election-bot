@@ -40,7 +40,9 @@ func (s *Service) GetLatestResults(ctx context.Context) (election.Snapshot, erro
 func (s *Service) GetMonitoringStatus(ctx context.Context) (ports.MonitoringStatus, error) {
 	return s.state.Status(ctx)
 }
-func (s *Service) SubscribeUser(ctx context.Context, chat int64) error {
+func (s *Service) SubscribeUser(ctx context.Context, chat int64) (err error) {
+	ctx, finish := services.Operation(ctx, "subscriptions.create")
+	defer func() { finish(err) }()
 	if chat <= 0 {
 		return errors.New("subscriptions require private chats")
 	}
@@ -78,7 +80,9 @@ func (s *Service) SubscribeUser(ctx context.Context, chat int64) error {
 		return nil
 	})
 }
-func (s *Service) UnsubscribeUser(ctx context.Context, chat int64) error {
+func (s *Service) UnsubscribeUser(ctx context.Context, chat int64) (err error) {
+	ctx, finish := services.Operation(ctx, "subscriptions.delete")
+	defer func() { finish(err) }()
 	return s.state.Transaction(ctx, func(tx ports.Transaction) error {
 		sub, e := tx.Subscription(chat)
 		if errors.Is(e, ports.ErrNotFound) {
@@ -111,7 +115,9 @@ func EvaluateMilestoneAlerts(previous, current election.Percentage, baseline int
 	}
 	return r
 }
-func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResult) error {
+func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResult) (err error) {
+	ctx, finish := services.Operation(ctx, "election.persist_snapshot")
+	defer func() { finish(err) }()
 	if r.Snapshot != nil {
 		if e := r.Snapshot.Validate(); e != nil {
 			return e
@@ -167,6 +173,7 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 		if !changed {
 			return nil
 		}
+		services.Counter(ctx, "election_snapshot_changes")
 		subs, e := tx.Subscriptions()
 		if e != nil {
 			return e
@@ -192,7 +199,9 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 		return nil
 	})
 }
-func (s *Service) PollElectionResults(ctx context.Context) error {
+func (s *Service) PollElectionResults(ctx context.Context) (err error) {
+	ctx, finish := services.Operation(ctx, "election.poll")
+	defer func() { finish(err) }()
 	s.pollMu.Lock()
 	defer s.pollMu.Unlock()
 	status, e := s.state.Status(ctx)
@@ -202,6 +211,9 @@ func (s *Service) PollElectionResults(ctx context.Context) error {
 	if status.NextPoll.After(s.clock.Now()) {
 		return nil
 	}
+	services.Counter(ctx, "election_poll")
+	started := time.Now()
+	defer services.Duration(ctx, "election_poll_duration", started)
 	latest, e := s.state.Latest(ctx)
 	if e != nil && !errors.Is(e, ports.ErrNoSnapshot) {
 		return e
@@ -219,6 +231,7 @@ func (s *Service) PollElectionResults(ctx context.Context) error {
 		e = s.ProcessElectionSnapshot(ctx, r)
 	}
 	if e != nil {
+		services.Counter(ctx, "election_poll_errors")
 		var api *ports.ExternalError
 		wait := interval
 		if errors.As(e, &api) {
@@ -280,7 +293,9 @@ func (s *Service) refreshFreshness(ctx context.Context) error {
 		return nil
 	})
 }
-func (s *Service) PublishResultUpdates(ctx context.Context) error {
+func (s *Service) PublishResultUpdates(ctx context.Context) (err error) {
+	ctx, finish := services.Operation(ctx, "notifications.publish")
+	defer func() { finish(err) }()
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
 	if e := s.refreshFreshness(ctx); e != nil {
@@ -316,6 +331,7 @@ func (s *Service) PublishResultUpdates(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		services.Counter(ctx, "telegram_notifications_failed")
 		kind := "transient"
 		var api *ports.ExternalError
 		if errors.As(e, &api) {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/Diaszano/election-bot/internal/application/ports"
+	"github.com/Diaszano/election-bot/internal/application/services"
 	"io"
 	"net/http"
 	"strings"
@@ -74,10 +75,16 @@ func maxTime(a, b time.Time) time.Time {
 	}
 	return a
 }
-func (c *Client) call(ctx context.Context, method string, chat int64, input any, out any) error {
+func (c *Client) call(ctx context.Context, method string, chat int64, input any, out any) (err error) {
+	operation := map[string]string{"sendMessage": "telegram.send_message", "editMessageText": "telegram.edit_message", "getUpdates": "telegram.get_updates", "getMe": "telegram.get_me"}[method]
+	ctx, finish := services.Operation(ctx, operation)
+	defer func() { finish(err) }()
 	if e := c.wait(ctx, chat, method == "sendMessage"); e != nil {
 		return e
 	}
+	services.Counter(ctx, "telegram_api_requests")
+	started := time.Now()
+	defer services.Duration(ctx, "telegram_api_request_duration", started)
 	body, e := json.Marshal(input)
 	if e != nil {
 		return &ports.ExternalError{Kind: "payload"}
@@ -154,10 +161,17 @@ func (c *Client) Send(ctx context.Context, chat int64, text string) (int64, erro
 	if e == nil && m.ID == 0 {
 		return 0, &ports.ExternalError{Kind: "transient"}
 	}
+	if e == nil {
+		services.Counter(ctx, "telegram_messages_sent")
+	}
 	return m.ID, e
 }
 func (c *Client) Edit(ctx context.Context, chat, id int64, text string) error {
-	return c.call(ctx, "editMessageText", chat, map[string]any{"chat_id": chat, "message_id": id, "text": text, "parse_mode": "HTML"}, nil)
+	e := c.call(ctx, "editMessageText", chat, map[string]any{"chat_id": chat, "message_id": id, "text": text, "parse_mode": "HTML"}, nil)
+	if e == nil {
+		services.Counter(ctx, "telegram_messages_edited")
+	}
+	return e
 }
 func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Update, error) {
 	var u []Update
