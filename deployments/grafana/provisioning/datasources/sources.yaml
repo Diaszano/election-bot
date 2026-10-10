@@ -34,5 +34,5 @@ datasources:
           matcherRegex: 'trace_id'
           matcherType: label
           datasourceUid: tempo
-          url: '$${__value.raw}'
+          url: '${__value.raw}'
           urlDisplayLabel: View trace

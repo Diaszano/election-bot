@@ -2,7 +2,6 @@ package integration
 
 import (
 	"bytes"
-	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -72,6 +71,6 @@ func TestExecutableSIGTERMAndUnavailableTelemetry(t *testing.T) {
 		t.Fatal("shutdown deadline exceeded")
 	}
 	if time.Since(start) > 10*time.Second {
-		t.Fatal(fmt.Sprint("slow shutdown"))
+		t.Fatal("slow shutdown")
 	}
 }

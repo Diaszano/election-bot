@@ -2,6 +2,8 @@ package tse
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"github.com/Diaszano/election-bot/internal/application/ports"
 	"github.com/Diaszano/election-bot/internal/domain/election"
 	"net/http"
@@ -53,5 +55,36 @@ func TestConditionalAndHTTPFailures(t *testing.T) {
 	r, e = p.Fetch(context.Background(), r.Validators)
 	if e != nil || !r.Unchanged {
 		t.Fatal(r, e)
+	}
+}
+
+func TestHTTPFailurePoliciesAndMalformedValidators(t *testing.T) {
+	for _, x := range []struct {
+		status     int
+		body, kind string
+		minimum    time.Duration
+	}{{404, "", "not_published", 15 * time.Minute}, {429, "", "rate_limited", 10 * time.Minute}, {500, "", "transient", 0}, {200, `{"bad":"json"}`, "", 0}, {304, "", "", 0}} {
+		t.Run(fmt.Sprint(x.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", "unaccepted")
+				w.WriteHeader(x.status)
+				fmt.Fprint(w, x.body)
+			}))
+			defer server.Close()
+			p := New(server.Client(), server.URL, election.Identity{Year: 2026, Round: 1, Code: "21270", Scope: "br", Office: 1}, time.UTC)
+			r, e := p.Fetch(context.Background(), ports.Validators{})
+			if e == nil {
+				t.Fatal("bad response accepted")
+			}
+			if r.Validators.ETag != "" {
+				t.Fatal("unaccepted validators leaked")
+			}
+			if x.kind != "" {
+				var api *ports.ExternalError
+				if !errors.As(e, &api) || api.Kind != x.kind || api.RetryAfter < x.minimum {
+					t.Fatal(e)
+				}
+			}
+		})
 	}
 }
