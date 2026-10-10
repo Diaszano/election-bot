@@ -7,6 +7,7 @@ import (
 )
 
 type Delivery struct {
+	Text                string
 	ID                  int64
 	ChatID, Generation  int64
 	Kind                string
