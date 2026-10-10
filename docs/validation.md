@@ -15,6 +15,7 @@ Date: 2026-10-10. Implementation branch: `feat/election-bot`. Architecture/spec/
 | `go vet ./...` | PASS |
 | golangci-lint 2.13.2 | PASS: zero issues |
 | Docker multistage non-root image | PASS: image built and application container healthy |
+| Container SIGTERM shutdown | PASS: rebuilt application stopped with exit code 0; test stack removed with volumes preserved |
 | Application-only and merged Compose configuration | PASS: `docker compose ... config -q` |
 | Collector configuration | PASS: running 0.162.0 `validate --config` |
 | Prometheus configuration and alert tests | PASS: running 3.15.0 promtool check/test |
