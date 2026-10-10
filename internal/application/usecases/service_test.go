@@ -5,6 +5,7 @@ import (
 	"github.com/Diaszano/election-bot/internal/adapters/outbound/simulation"
 	"github.com/Diaszano/election-bot/internal/adapters/outbound/sqlite"
 	"github.com/Diaszano/election-bot/internal/application/ports"
+	"github.com/Diaszano/election-bot/internal/domain/election"
 	"github.com/Diaszano/election-bot/internal/domain/subscription"
 	"path/filepath"
 	"testing"
@@ -252,5 +253,104 @@ func TestUpstreamFailureRetainsSnapshotAndCooldown(t *testing.T) {
 	}
 	if e = svc.PollElectionResults(ctx); e != nil {
 		t.Fatal("cooldown fetched again")
+	}
+}
+
+func TestUnchanged200ClearsStaleMessage(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	c := &clock{time.Now()}
+	send := &sender{}
+	svc := New(db, db, simulation.New(), send, c, Settings{Location: time.UTC, StaleAfter: time.Minute, DelayedAfter: time.Hour})
+	s := simulation.Snapshot(0)
+	s.Published = c.Now()
+	s.Generated = c.Now()
+	if err = svc.SubscribeUser(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &s}); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.PublishResultUpdates(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(2 * time.Minute)
+	if err = svc.PublishResultUpdates(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if send.edits != 1 {
+		t.Fatalf("stale edits=%d", send.edits)
+	}
+	if err = svc.ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &s, Validators: ports.Validators{ETag: "renewed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.PublishResultUpdates(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if send.edits != 2 {
+		t.Fatalf("recovery edits=%d, want 2", send.edits)
+	}
+}
+
+type recoveringProvider struct {
+	calls    int
+	failures int
+	kind     string
+	snapshot election.Snapshot
+}
+
+func (p *recoveringProvider) Fetch(context.Context, ports.Validators) (ports.FetchResult, error) {
+	p.calls++
+	if p.calls <= p.failures {
+		return ports.FetchResult{}, &ports.ExternalError{Kind: p.kind}
+	}
+	return ports.FetchResult{Snapshot: &p.snapshot}, nil
+}
+func TestPollingRetriesAndAcceptedStatusInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind          string
+		failures, wantCalls int
+		final               bool
+		wantInterval        time.Duration
+	}{
+		{"transient recovery", "transient", 2, 3, false, 10 * time.Second},
+		{"bounded failures", "transient", 10, 3, false, 10 * time.Second},
+		{"missing endpoint", "not_published", 10, 1, false, 5 * time.Minute},
+		{"new finalization", "transient", 0, 1, true, time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "app.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			c := &clock{time.Now()}
+			s := simulation.Snapshot(100)
+			if tc.final {
+				s.Status = election.Finalized
+				s.Source = "official" // Synthetic domain state, never an external status mapping.
+			}
+			p := &recoveringProvider{failures: tc.failures, kind: tc.kind, snapshot: s}
+			svc := New(db, db, p, &sender{}, c, Settings{Location: time.UTC, PollInterval: 10 * time.Second, BeforeInterval: 5 * time.Minute, FinalInterval: time.Hour, CountingStart: c.Now().Add(time.Hour)})
+			err = svc.PollElectionResults(ctx)
+			if tc.failures < 3 && err != nil {
+				t.Fatal(err)
+			}
+			if p.calls != tc.wantCalls {
+				t.Fatalf("calls=%d want %d", p.calls, tc.wantCalls)
+			}
+			st, e := db.Status(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if tc.failures < 3 && st.NextPoll.Sub(c.Now()) != tc.wantInterval {
+				t.Fatalf("interval=%s want %s", st.NextPoll.Sub(c.Now()), tc.wantInterval)
+			}
+		})
 	}
 }

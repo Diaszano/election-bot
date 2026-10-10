@@ -69,3 +69,42 @@ func TestTransactionRollbackAndReopen(t *testing.T) {
 		t.Fatal(jobs, e)
 	}
 }
+
+func TestOldFailureCannotRemoveNewGeneration(t *testing.T) {
+	for _, kind := range []string{"payload", "blocked", "invalid_chat"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := Open(ctx, filepath.Join(t.TempDir(), "app.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			save := func(g int64) error {
+				return db.Transaction(ctx, func(tx ports.Transaction) error {
+					if err := tx.PutSubscription(subscription.Subscription{ChatID: 1, Active: true, Generation: g}); err != nil {
+						return err
+					}
+					return tx.Enqueue(notification.Delivery{ChatID: 1, Generation: g, Kind: "main", Revision: "same", Text: "text", Due: time.Now()})
+				})
+			}
+			if err = save(1); err != nil {
+				t.Fatal(err)
+			}
+			jobs, err := db.Pending(ctx, time.Now(), 10)
+			if err != nil || len(jobs) != 1 {
+				t.Fatal(jobs, err)
+			}
+			old := jobs[0]
+			if err = save(2); err != nil {
+				t.Fatal(err)
+			}
+			if err = db.MarkUndeliverable(ctx, old, kind); err != nil {
+				t.Fatal(err)
+			}
+			jobs, err = db.Pending(ctx, time.Now(), 10)
+			if err != nil || len(jobs) != 1 || jobs[0].Generation != 2 {
+				t.Fatal("new generation lost", jobs, err)
+			}
+		})
+	}
+}

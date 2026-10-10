@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTelegramClassificationAndRedaction(t *testing.T) {
@@ -38,5 +39,21 @@ func TestSendAndEdit(t *testing.T) {
 	}
 	if e = c.Edit(context.Background(), 1, 42, "new"); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestWaitingRequestRespectsNewRetryAfter(t *testing.T) {
+	c := New(&http.Client{}, "http://unused", "token", time.Millisecond)
+	c.global = time.Now().Add(100 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.wait(ctx, 0, false) }()
+	time.Sleep(30 * time.Millisecond)
+	c.mu.Lock()
+	c.blockedUntil = time.Now().Add(time.Second)
+	c.mu.Unlock()
+	if err := <-done; err == nil {
+		t.Fatal("waiting request ignored later Retry-After")
 	}
 }

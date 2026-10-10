@@ -173,6 +173,7 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 		status.LastError = ""
 		status.NextPoll = r.Next
 		fresh := s.freshness(snapshot, status)
+		presentationChanged := status.Stale != fresh.Stale || status.Delayed != fresh.Delayed
 		status.Stale = fresh.Stale
 		status.Delayed = fresh.Delayed
 		if e = tx.Save(snapshot, r.Validators); e != nil {
@@ -181,10 +182,10 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 		if e = tx.SetStatus(status); e != nil {
 			return e
 		}
-		if !changed {
+		if !changed && !presentationChanged {
 			return nil
 		}
-		acceptedChange = true
+		acceptedChange = changed
 		subs, e := tx.Subscriptions()
 		if e != nil {
 			return e
@@ -199,7 +200,7 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 					return e
 				}
 			}
-			if sub.MilestonesEnabled {
+			if changed && sub.MilestonesEnabled {
 				for _, m := range EvaluateMilestoneAlerts(previous, snapshot.Progress, sub.Baseline) {
 					if e = tx.Enqueue(notification.Delivery{ChatID: sub.ChatID, Generation: sub.Generation, Kind: "milestone", Milestone: m, Revision: fmt.Sprintf("milestone-%d", m), Text: services.FormatMilestone(snapshot, m, s.settings.Location), Due: s.clock.Now()}); e != nil {
 						return e
@@ -234,18 +235,36 @@ func (s *Service) PollElectionResults(ctx context.Context) (err error) {
 	if e != nil && !errors.Is(e, ports.ErrNoSnapshot) {
 		return e
 	}
-	interval := s.settings.PollInterval
-	if s.clock.Now().Before(s.settings.CountingStart) {
-		interval = s.settings.BeforeInterval
+
+	interval := s.pollInterval(latest.Snapshot.Status)
+	var r ports.FetchResult
+	for attempt := 0; attempt < 3; attempt++ {
+		r, e = s.provider.Fetch(ctx, latest.Validators)
+		var api *ports.ExternalError
+		if e == nil || attempt == 2 || !errors.As(e, &api) || api.Kind != "transient" || api.RetryAfter > 0 {
+			break
+		}
+		retryCtx, finishRetry := services.Operation(ctx, "election.poll_retry")
+		timer := time.NewTimer(time.Duration(100*(1<<attempt)+rand.IntN(100)) * time.Millisecond)
+		select {
+		case <-retryCtx.Done():
+			timer.Stop()
+			finishRetry(retryCtx.Err())
+			return retryCtx.Err()
+		case <-timer.C:
+			finishRetry(nil)
+		}
 	}
-	if latest.Snapshot.Status == election.Finalized {
-		interval = s.settings.FinalInterval
-	}
-	r, e := s.provider.Fetch(ctx, latest.Validators)
 	if e == nil {
+		status := latest.Snapshot.Status
+		if r.Snapshot != nil {
+			status = r.Snapshot.Status
+		}
+		interval = s.pollInterval(status)
 		r.Next = maxTime(r.Next, s.clock.Now().Add(interval))
 		e = s.ProcessElectionSnapshot(ctx, r)
 	}
+
 	if e != nil {
 		services.Counter(ctx, "election_poll_errors")
 		var api *ports.ExternalError
@@ -266,6 +285,15 @@ func (s *Service) PollElectionResults(ctx context.Context) (err error) {
 		return errors.Join(e, save)
 	}
 	return nil
+}
+func (s *Service) pollInterval(status election.Status) time.Duration {
+	if status == election.Finalized {
+		return s.settings.FinalInterval
+	}
+	if status != election.Counting && s.clock.Now().Before(s.settings.CountingStart) {
+		return s.settings.BeforeInterval
+	}
+	return s.settings.PollInterval
 }
 func maxTime(a, b time.Time) time.Time {
 	if a.Before(b) {

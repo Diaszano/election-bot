@@ -62,7 +62,7 @@ func Run(parent context.Context, c config.Config) error {
 		logger.Warn("state metrics initialization failed")
 	}
 
-	var sender ports.NotificationSender = &RecordingSender{}
+	var sender ports.NotificationSender
 	var api *telegramapi.Client
 	username := ""
 	if c.TelegramEnabled {
@@ -82,9 +82,11 @@ func Run(parent context.Context, c config.Config) error {
 	var wg sync.WaitGroup
 	start := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
 	start(func() { scheduler.Run(ctx, time.Second, "election.poll", logger, svc.PollElectionResults) })
-	start(func() {
-		scheduler.Run(ctx, c.NotificationInterval, "notifications.publish", logger, svc.PublishResultUpdates)
-	})
+	if c.TelegramEnabled {
+		start(func() {
+			scheduler.Run(ctx, c.NotificationInterval, "notifications.publish", logger, svc.PublishResultUpdates)
+		})
+	}
 	if api != nil {
 		h := commands.New(svc, sender, c.Location, username)
 		start(func() {

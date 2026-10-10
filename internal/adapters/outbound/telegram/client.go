@@ -60,14 +60,35 @@ func (c *Client) wait(ctx context.Context, chat int64, send bool) error {
 		c.global = next.Add(50 * time.Millisecond)
 	}
 	c.mu.Unlock()
-	timer := time.NewTimer(max(time.Until(next), 0))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+	for {
+		timer := time.NewTimer(max(time.Until(next), 0))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		c.mu.Lock()
+		if !time.Now().Before(c.blockedUntil) {
+			c.mu.Unlock()
+			return nil
+		}
+		// A concurrent request can extend the server cooldown after reservation.
+		next = maxTime(c.blockedUntil, c.global)
+		if c.interval > 0 {
+			if chat != 0 {
+				next = maxTime(next, c.chats[chat])
+				step := c.interval
+				if send {
+					step = max(step, 3*time.Second)
+				}
+				c.chats[chat] = next.Add(step)
+			}
+			c.global = next.Add(50 * time.Millisecond)
+		}
+		c.mu.Unlock()
 	}
+
 }
 func maxTime(a, b time.Time) time.Time {
 	if a.Before(b) {

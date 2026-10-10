@@ -9,6 +9,7 @@ import (
 	"github.com/Diaszano/election-bot/internal/application/ports"
 	"github.com/Diaszano/election-bot/internal/application/services"
 	"github.com/Diaszano/election-bot/internal/domain/election"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -89,5 +90,16 @@ func (h *Handler) Handle(ctx context.Context, u out.Update) error {
 		text = "Comando desconhecido.\n" + help
 	}
 	_, e := h.sender.Send(ctx, m.Chat.ID, text)
+	var api *ports.ExternalError
+	if errors.As(e, &api) && (api.Kind == "blocked" || api.Kind == "invalid_chat" || api.Kind == "payload") {
+		if api.Kind != "payload" {
+			if err := h.actions.UnsubscribeUser(ctx, m.Chat.ID); err != nil {
+				return err
+			}
+		}
+		slog.WarnContext(ctx, "command reply permanently undeliverable", "operation", "telegram.command_reply", "error_kind", api.Kind)
+		services.Counter(ctx, "telegram_notifications_failed")
+		return nil
+	}
 	return e
 }

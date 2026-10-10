@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/Diaszano/election-bot/internal/platform/config"
 	"github.com/Diaszano/election-bot/internal/platform/lifecycle"
 	"github.com/Diaszano/election-bot/internal/platform/observability"
 	"go.opentelemetry.io/otel"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,13 +23,7 @@ func main() {
 	health := flag.Bool("healthcheck", false, "probe local liveness")
 	flag.Parse()
 	if *health {
-		client := &http.Client{Timeout: 2 * time.Second}
-		r, e := client.Get("http://127.0.0.1:8080/health/live")
-		if e != nil {
-			os.Exit(1)
-		}
-		r.Body.Close()
-		if r.StatusCode != 200 {
+		if e := healthcheck(); e != nil {
 			os.Exit(1)
 		}
 		return
@@ -76,4 +72,25 @@ func main() {
 		fmt.Fprintln(os.Stderr, e)
 		os.Exit(1)
 	}
+}
+
+func healthcheck() error {
+	address := os.Getenv("HTTP_LISTEN_ADDRESS")
+	if address == "" {
+		address = ":8080"
+	}
+	_, port, e := net.SplitHostPort(address)
+	if e != nil {
+		return errors.New("invalid health listen address")
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	r, e := client.Get("http://" + net.JoinHostPort("127.0.0.1", port) + "/health/live")
+	if e != nil {
+		return errors.New("local health probe failed")
+	}
+	defer r.Body.Close()
+	if r.StatusCode != 200 {
+		return errors.New("local health unavailable")
+	}
+	return nil
 }

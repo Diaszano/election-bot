@@ -20,9 +20,12 @@ func (a *actions) GetMonitoringStatus(context.Context) (ports.MonitoringStatus, 
 	return ports.MonitoringStatus{}, nil
 }
 
-type sender struct{ calls int }
+type sender struct {
+	calls int
+	err   error
+}
 
-func (s *sender) Send(context.Context, int64, string) (int64, error) { s.calls++; return 1, nil }
+func (s *sender) Send(context.Context, int64, string) (int64, error) { s.calls++; return 1, s.err }
 func (s *sender) Edit(context.Context, int64, int64, string) error   { return nil }
 func TestCommandsPrivateOnlyAndSuffix(t *testing.T) {
 	a := &actions{}
@@ -48,5 +51,35 @@ func TestCommandsPrivateOnlyAndSuffix(t *testing.T) {
 	h.Handle(ctx, out.Update{Message: &out.Message{Chat: out.Chat{ID: 1, Type: "private"}, Text: "/start@other"}})
 	if a.starts != 1 {
 		t.Fatal("wrong suffix")
+	}
+}
+
+func TestPermanentReplyFailureDoesNotPoisonCommands(t *testing.T) {
+	for _, kind := range []string{"blocked", "invalid_chat", "payload", "transient"} {
+		t.Run(kind, func(t *testing.T) {
+			a := &actions{}
+			s := &sender{err: &ports.ExternalError{Kind: kind}}
+			h := New(a, s, time.UTC, "bot")
+			err := h.Handle(context.Background(), out.Update{Message: &out.Message{Chat: out.Chat{ID: 1, Type: "private"}, Text: "/help"}})
+			if kind == "transient" {
+				if err == nil {
+					t.Fatal("transient reply must retry")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal("permanent reply blocks offset", err)
+			}
+			if (kind == "blocked" || kind == "invalid_chat") && a.stops != 1 {
+				t.Fatal("subscription remains active")
+			}
+			s.err = nil
+			if err = h.Handle(context.Background(), out.Update{Message: &out.Message{Chat: out.Chat{ID: 2, Type: "private"}, Text: "/start"}}); err != nil {
+				t.Fatal(err)
+			}
+			if a.starts != 1 {
+				t.Fatal("next user blocked")
+			}
+		})
 	}
 }

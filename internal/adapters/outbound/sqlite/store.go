@@ -222,7 +222,7 @@ func (s *Store) MarkUndeliverable(ctx context.Context, d notification.Delivery, 
 				return e
 			}
 		}
-		_, e := t.tx.ExecContext(ctx, "UPDATE outbox SET state='failed',last_error=? WHERE id=? AND revision=?", kind, d.ID, d.Revision)
+		_, e := t.tx.ExecContext(ctx, "UPDATE outbox SET state='failed',last_error=? WHERE id=? AND revision=? AND generation=? AND state='pending'", kind, d.ID, d.Revision, d.Generation)
 		return e
 	})
 }
