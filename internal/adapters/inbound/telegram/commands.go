@@ -21,14 +21,15 @@ type Actions interface {
 	GetMonitoringStatus(context.Context) (ports.MonitoringStatus, error)
 }
 type Handler struct {
-	actions  Actions
-	sender   ports.NotificationSender
-	location *time.Location
-	username string
+	actions    Actions
+	sender     ports.NotificationSender
+	location   *time.Location
+	username   string
+	sourceMode string
 }
 
-func New(a Actions, s ports.NotificationSender, l *time.Location, username string) *Handler {
-	return &Handler{a, s, l, username}
+func New(a Actions, s ports.NotificationSender, l *time.Location, username, sourceMode string) *Handler {
+	return &Handler{actions: a, sender: s, location: l, username: username, sourceMode: sourceMode}
 }
 
 const help = "Comandos disponíveis:\n/start — Receber atualizações\n/agora — Ver resultado atual\n/status — Ver situação do monitoramento\n/parar — Parar atualizações\n/help — Mostrar ajuda"
@@ -80,9 +81,23 @@ func (h *Handler) Handle(ctx context.Context, u out.Update) error {
 		if !st.LastSuccess.IsZero() {
 			last = st.LastSuccess.In(h.location).Format("02/01/2006 às 15:04:05")
 		}
-		text = fmt.Sprintf("📡 Monitoramento ativo\nÚltima sincronização: %s\nFalhas consecutivas: %d", last, st.Failures)
-		if st.Stale {
-			text += "\n⚠️ Dados possivelmente desatualizados."
+		syncFreshness := "atualizada"
+		if st.LastSuccess.IsZero() {
+			syncFreshness = "nunca"
+		} else if st.Stale {
+			syncFreshness = "desatualizada"
+		}
+		publication := "aguardando dados"
+		if !st.PublishedAt.IsZero() {
+			publication = "atualizada"
+			if st.Delayed {
+				publication = "atrasada"
+			}
+			publication += " (" + st.PublishedAt.In(h.location).Format("02/01/2006 às 15:04:05") + ")"
+		}
+		text = fmt.Sprintf("📡 Monitoramento ativo\nFonte de dados: %s\nSincronização: %s — %s\nPublicação TSE: %s\nFalhas consecutivas: %d", sourceName(h.sourceMode), syncFreshness, last, publication, st.Failures)
+		if st.Stale || st.Delayed {
+			text += "\n⚠️ Há dados possivelmente desatualizados."
 		}
 	case "/help":
 		text = help
@@ -102,4 +117,11 @@ func (h *Handler) Handle(ctx context.Context, u out.Update) error {
 		return nil
 	}
 	return e
+}
+
+func sourceName(mode string) string {
+	if mode == "simulation" {
+		return "simulação"
+	}
+	return "oficial"
 }

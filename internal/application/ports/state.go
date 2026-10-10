@@ -15,10 +15,10 @@ var ErrNotFound = errors.New("subscription not found")
 
 type Validators struct{ ETag, LastModified string }
 type MonitoringStatus struct {
-	LastSuccess, NextPoll time.Time
-	Failures              int
-	LastError             string
-	Stale, Delayed        bool
+	LastSuccess, NextPoll, PublishedAt time.Time
+	Failures                           int
+	LastError                          string
+	Stale, Delayed                     bool
 }
 type StoredSnapshot struct {
 	Snapshot   election.Snapshot

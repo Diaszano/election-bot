@@ -23,8 +23,9 @@ Date: 2026-10-10. Implementation branch: `feat/election-bot`. Architecture/spec/
 | Loki native OTLP ingestion | PASS: application log with trace ID returned |
 | Tempo correlated trace retrieval | PASS: new simulation trace `ca36f1062eecf7b971846896a983ebf5` retrieved, with its newly ingested correlated Loki logs |
 | Grafana provisioning and readiness probe | PASS: verifier checked source/dashboard UIDs and probe success |
+| `/status` regression tests | PASS: configured source, no publication, current/stale synchronization, publication delay and publication timestamp |
 
-`go test -race ./...` passed across all packages, including the executable shutdown test. The final suite passed 60 tests across 19 packages; race detection and lint were rerun after review fixes. Backend versions: Collector 0.162.0, Prometheus 3.15.0, Grafana 13.2.3, Tempo 3.1.0, Loki 3.7.8, probe exporter 0.29.0. Docker daemon access was initially denied but became available after permissions changed; Docker checks were subsequently executed.
+`go test ./...` and `go test -race ./...` passed after the `/status` change: 64 tests across 19 packages. `make lint` (including `go vet ./...`), `make build`, `make simulate`, and `go mod verify` also passed. Backend versions: Collector 0.162.0, Prometheus 3.15.0, Grafana 13.2.3, Tempo 3.1.0, Loki 3.7.8, probe exporter 0.29.0. Docker daemon access was initially denied but became available after permissions changed; Docker checks were subsequently executed. The image and live telemetry stack were verified before the final `/status` change; the changed Go source was rebuilt/tested natively, while Compose definitions were unchanged.
 
 ## Integration boundary
 
@@ -45,6 +46,15 @@ See [fixture provenance](../test/fixtures/tse/README.md), [TSE contract](tse-con
 
 A fresh-context reviewer inspected `1704bf4..64b312a`. Five Important regressions were reproduced before fixing: unchanged-200 stale-warning recovery, old-generation terminal delivery failure, disabled transport consuming pending work, permanent command replies poisoning the shared command stream, and concurrent Retry-After cooldown bypass. Each permanent fix has a regression observed RED then GREEN. The polling finding was upgraded from Minor because recovery and latency are required behavior: transient fetches now have at most three attempts with cancellable exponential jitter; missing/rate-limited endpoints and explicit Retry-After do not receive immediate retries. Subsequent cadence uses the accepted counting/final status. A custom-port healthcheck regression was also fixed.
 
-Final validation after these changes: `go test ./...` (60 tests, 19 packages), `go test -race ./...`, `make lint` (including `go vet ./...`), `make build`, `make simulate`, and `go mod verify` passed. Both Compose configurations validated and the rebuilt image ran. Collector validation and Prometheus configuration/five alert rule checks and rule tests passed. Actual metrics, new correlated logs/traces, Grafana datasource/dashboard provisioning, and readiness were queried successfully.
+Final validation before the `/status` follow-up passed `go test ./...` (60 tests, 19 packages), `go test -race ./...`, `make lint` (including `go vet ./...`), `make build`, `make simulate`, and `go mod verify`. The `/status` follow-up adds regression cases for simulation/official source labels, no published data, fresh and stale synchronization, publication delay and publication timestamp; its focused tests and final full-suite/race results are recorded below. Both Compose configurations validated and the rebuilt image ran. Collector validation and Prometheus configuration/five alert rule checks and rule tests passed. Actual metrics, new correlated logs/traces, Grafana datasource/dashboard provisioning, and readiness were queried successfully.
 
-Deferred Minor: `/status` currently reports synchronization freshness and failures but omits source mode and publication-delay detail. Main results include those distinctions. The reviewer declined to judge verified runoff/winner semantics and public Telegram delivery: the closed production gate and fake-server testing remain the explicit boundary, with costs of unavailable official monitoring and unverified live-account behavior respectively.
+The `/status` gap is fixed: it now displays configured source mode, last synchronization time/freshness, publication time/freshness, and consecutive failures. If no snapshot has been published, it reports that it is waiting for data. Regression coverage includes no publication, fresh results, and stale/delayed results. A committed-file scan found no token or credential values; the tracked `.env.example` contains only empty secret fields and `.env` is ignored.
+
+## Remaining work before production
+
+- Run a Telegram delivery smoke test with a properly configured bot. No real token/account was supplied or used in validation.
+- Retrieve and verify the official TSE EA20 presidential runoff contract and EA11 production paths/configuration.
+- Verify official national finalization and elected-candidate confirmation semantics; never infer a winner from vote totals or 100% progress.
+- Complete production readiness validation before October 25, 2026. Official mode must continue failing closed until the contract and status mappings are reviewed and tested.
+
+No live Telegram delivery or official runoff operation has been validated. Fake-server Telegram API tests, first-round simulation fixture parsing, and the offline recovery simulation do not establish those claims. The tracked `.env.example` contains empty credential fields; the local `.env` is ignored. A scan of committed files found no token/credential values.

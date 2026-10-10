@@ -48,7 +48,19 @@ func (s *Service) GetLatestResults(ctx context.Context) (election.Snapshot, erro
 	return r.Snapshot, e
 }
 func (s *Service) GetMonitoringStatus(ctx context.Context) (ports.MonitoringStatus, error) {
-	return s.state.Status(ctx)
+	status, err := s.state.Status(ctx)
+	if err != nil {
+		return status, err
+	}
+	latest, err := s.state.Latest(ctx)
+	if errors.Is(err, ports.ErrNoSnapshot) {
+		return status, nil
+	}
+	if err != nil {
+		return status, err
+	}
+	status.PublishedAt = latest.Snapshot.Published
+	return status, nil
 }
 func (s *Service) SubscribeUser(ctx context.Context, chat int64) (err error) {
 	ctx, finish := services.Operation(ctx, "subscriptions.create")

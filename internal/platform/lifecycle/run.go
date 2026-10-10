@@ -88,7 +88,7 @@ func Run(parent context.Context, c config.Config) error {
 		})
 	}
 	if api != nil {
-		h := commands.New(svc, sender, c.Location, username)
+		h := commands.New(svc, sender, c.Location, username, c.Mode)
 		start(func() {
 			scheduler.Run(ctx, time.Second, "telegram.commands", logger, func(ctx context.Context) error {
 				offset, e := db.Offset(ctx)
