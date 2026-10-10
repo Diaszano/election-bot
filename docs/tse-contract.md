@@ -1,0 +1,7 @@
+# TSE contract verification
+
+Production mode is deliberately fail-closed. EA20 PDF retrieval returned HTTP 403 on 2026-10-10. Captured first-round simulation does not verify presidential runoff finalization/elected semantics. See [fixture provenance](../test/fixtures/tse/README.md) and [design sources](superpowers/specs/2026-10-10-election-bot-design.md).
+
+The simulation adapter translates observed `ele`, `t`, `f`, `tpabr`, `cdabr`, `dt/ht`, `dg/hg`, `idg`, nested `carg[].agr[].par[].cand[]`, party `sg`, candidate `n/nmu/vap/pvap/dvt/st`, sections `s.pst`, vote totals `v.tv/vv/vb/tvn`. Candidate `pvap` in this sample uses the vote-to-candidates denominator, which includes invalid destinations; it must not be mislabeled as percentage of valid votes. Compute valid-vote percentage only for observed valid destination candidates and clearly identify derived values. No simulation `e=s` or `st=2º turno` produces a winner. Official parser enablement requires the actual EA20 schema and runoff semantics, EA11 production directory verification, tests with correct election/phase and reviewed mappings.
+
+Precedence: compare official totalization publication time, then generation time. IDs are opaque. Reject older pairs. Equal pairs with differing contents are ambiguous and rejected; equal IDs cannot change contents. Equal semantic contents may refresh validators. Newer corrections may reduce votes/progress. Rejected bodies never update validators. Accepting an unchanged 200 updates committed validators/representation atomically, so restart can use 304 safely.
