@@ -5,6 +5,7 @@ import (
 	"github.com/Diaszano/election-bot/internal/adapters/outbound/simulation"
 	"github.com/Diaszano/election-bot/internal/adapters/outbound/sqlite"
 	"github.com/Diaszano/election-bot/internal/application/ports"
+	"github.com/Diaszano/election-bot/internal/domain/subscription"
 	"path/filepath"
 	"testing"
 	"time"
@@ -121,5 +122,135 @@ func TestPrivateSubscriptionAndDurableFailure(t *testing.T) {
 	svc.PublishResultUpdates(ctx)
 	if send.sends != 3 {
 		t.Fatal(send)
+	}
+}
+
+func TestRepeatedStartPreservesBaselineAndGeneration(t *testing.T) {
+	ctx := context.Background()
+	db, e := sqlite.Open(ctx, filepath.Join(t.TempDir(), "a.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	s := simulation.Snapshot(50)
+	c := &clock{s.Published}
+	svc := New(db, db, simulation.New(), &sender{}, c, Settings{Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour})
+	if e = svc.ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &s}); e != nil {
+		t.Fatal(e)
+	}
+	if e = svc.SubscribeUser(ctx, 1); e != nil {
+		t.Fatal(e)
+	}
+	var before subscription.Subscription
+	db.Transaction(ctx, func(tx ports.Transaction) error { before, e = tx.Subscription(1); return e })
+	if before.Baseline != 50 || before.Generation != 1 {
+		t.Fatal(before)
+	}
+	s = simulation.Snapshot(75)
+	svc.ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &s})
+	svc.SubscribeUser(ctx, 1)
+	db.Transaction(ctx, func(tx ports.Transaction) error {
+		after, e := tx.Subscription(1)
+		if e != nil || after != before {
+			t.Fatal(before, after, e)
+		}
+		return e
+	})
+}
+
+type stoppingSender struct {
+	svc  *Service
+	sent int
+}
+
+func (s *stoppingSender) Send(ctx context.Context, chat int64, text string) (int64, error) {
+	s.sent++
+	if e := s.svc.UnsubscribeUser(ctx, chat); e != nil {
+		return 0, e
+	}
+	return 1, nil
+}
+func (s *stoppingSender) Edit(context.Context, int64, int64, string) error { return nil }
+func TestUnsubscribeStopsRemainingBatch(t *testing.T) {
+	ctx := context.Background()
+	db, e := sqlite.Open(ctx, filepath.Join(t.TempDir(), "a.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	c := &clock{simulation.Snapshot(50).Published}
+	send := &stoppingSender{}
+	svc := New(db, db, simulation.New(), send, c, Settings{Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour})
+	send.svc = svc
+	svc.SubscribeUser(ctx, 1)
+	snapshot := simulation.Snapshot(50)
+	svc.ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &snapshot})
+	if e = svc.PublishResultUpdates(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if send.sent != 1 {
+		t.Fatalf("sent %d after unsubscribe", send.sent)
+	}
+}
+func TestOldEditCompletionKeepsNewRevision(t *testing.T) {
+	ctx := context.Background()
+	db, e := sqlite.Open(ctx, filepath.Join(t.TempDir(), "a.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	c := &clock{simulation.Snapshot(25).Published}
+	svc := New(db, db, simulation.New(), &sender{}, c, Settings{Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour})
+	svc.SubscribeUser(ctx, 1)
+	snapshot := simulation.Snapshot(25)
+	svc.ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &snapshot})
+	jobs, e := db.Pending(ctx, c.Now(), 10)
+	if e != nil {
+		t.Fatal(e)
+	}
+	old := jobs[0]
+	snapshot = simulation.Snapshot(50)
+	svc.ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &snapshot})
+	if e = db.Complete(ctx, old, 42, c.Now()); e != nil {
+		t.Fatal(e)
+	}
+	jobs, e = db.Pending(ctx, c.Now(), 10)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(jobs) != 3 || jobs[0].Revision == old.Revision || jobs[0].MessageID != 42 {
+		t.Fatal(jobs)
+	}
+}
+
+type failingProvider struct{}
+
+func (failingProvider) Fetch(context.Context, ports.Validators) (ports.FetchResult, error) {
+	return ports.FetchResult{}, &ports.ExternalError{Kind: "not_published", RetryAfter: 15 * time.Minute}
+}
+func TestUpstreamFailureRetainsSnapshotAndCooldown(t *testing.T) {
+	ctx := context.Background()
+	db, e := sqlite.Open(ctx, filepath.Join(t.TempDir(), "a.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer db.Close()
+	c := &clock{simulation.Snapshot(25).Published}
+	svc := New(db, db, failingProvider{}, &sender{}, c, Settings{Location: time.UTC, PollInterval: 10 * time.Second, BeforeInterval: 5 * time.Minute, FinalInterval: time.Hour, StaleAfter: 2 * time.Minute, DelayedAfter: 5 * time.Minute})
+	snapshot := simulation.Snapshot(25)
+	svc.ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &snapshot, Validators: ports.Validators{ETag: "good"}})
+	if svc.PollElectionResults(ctx) == nil {
+		t.Fatal("upstream error hidden")
+	}
+	saved, e := db.Latest(ctx)
+	if e != nil || saved.Validators.ETag != "good" {
+		t.Fatal(saved, e)
+	}
+	status, e := db.Status(ctx)
+	if e != nil || status.Failures != 1 || status.NextPoll.Sub(c.Now()) < 15*time.Minute {
+		t.Fatal(status, e)
+	}
+	if e = svc.PollElectionResults(ctx); e != nil {
+		t.Fatal("cooldown fetched again")
 	}
 }

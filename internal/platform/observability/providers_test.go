@@ -3,6 +3,8 @@ package observability
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	telegramapi "github.com/Diaszano/election-bot/internal/adapters/outbound/telegram"
 	"github.com/Diaszano/election-bot/internal/platform/config"
 	"go.opentelemetry.io/otel"
 	logpb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -10,6 +12,8 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -83,6 +87,17 @@ func TestAllSignalsExportAndCorrelation(t *testing.T) {
 	}
 	ctx, span := otel.Tracer("election-bot").Start(context.Background(), "election.poll")
 	runtime.Logger.InfoContext(ctx, "safe operation")
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(403)
+		fmt.Fprint(w, `{"ok":false,"error_code":403,"description":"sentinel-secret 999444333 private-content"}`)
+	}))
+	defer fake.Close()
+	api := telegramapi.New(fake.Client(), fake.URL, "sentinel-secret", 0)
+	if _, e = api.Send(ctx, 999444333, "private-content"); e == nil {
+		t.Fatal("fake remote failure ignored")
+	}
+	traceID := span.SpanContext().TraceID().String()
+
 	counter, _ := otel.Meter("election-bot").Int64Counter("election_poll")
 	counter.Add(ctx, 1)
 	span.End()
@@ -97,6 +112,14 @@ func TestAllSignalsExportAndCorrelation(t *testing.T) {
 		t.Fatalf("signals logs=%d traces=%d metrics=%d", r.logs, r.traces, r.metrics)
 	}
 	joined := strings.Join(r.payloads, "\n")
+	for _, secret := range []string{"sentinel-secret", "999444333", "private-content"} {
+		if strings.Contains(joined, secret) {
+			t.Fatal("sensitive exported signal")
+		}
+	}
+	if !strings.Contains(joined, traceID) {
+		t.Fatal("missing log/trace correlation ID")
+	}
 	for _, v := range []string{"election-bot", "elections", "test-version", "election_poll", "trace_id", "span_id"} {
 		if !strings.Contains(joined, v) {
 			t.Fatal("missing exported field", v)

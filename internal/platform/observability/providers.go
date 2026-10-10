@@ -64,6 +64,7 @@ func Setup(ctx context.Context, c config.Config, version string) (*Runtime, erro
 	r := &Runtime{}
 	h := handler{json: slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})}
 	r.Logger = slog.New(h)
+	slog.SetDefault(r.Logger)
 	if !c.OTELEnabled {
 		return r, nil
 	}
@@ -87,6 +88,7 @@ func Setup(ctx context.Context, c config.Config, version string) (*Runtime, erro
 	r.log = sdklog.NewLoggerProvider(sdklog.WithResource(res), sdklog.WithProcessor(sdklog.NewBatchProcessor(le, sdklog.WithExportInterval(time.Second), sdklog.WithExportTimeout(2*time.Second))))
 	h.otel = otelslog.NewHandler("election-bot", otelslog.WithLoggerProvider(r.log))
 	r.Logger = slog.New(h)
+	slog.SetDefault(r.Logger)
 	otel.SetTracerProvider(r.trace)
 	otel.SetMeterProvider(r.metric)
 	otel.SetTextMapPropagator(propagation.TraceContext{})

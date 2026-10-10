@@ -10,6 +10,8 @@ import (
 	"github.com/Diaszano/election-bot/internal/domain/election"
 	"github.com/Diaszano/election-bot/internal/domain/notification"
 	"github.com/Diaszano/election-bot/internal/domain/subscription"
+	"go.opentelemetry.io/otel"
+	"log/slog"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -31,6 +33,14 @@ type Service struct {
 }
 
 func New(state ports.State, deliveries ports.Deliveries, provider ports.ResultsProvider, sender ports.NotificationSender, clock ports.Clock, settings Settings) *Service {
+	for _, name := range []string{"election_poll", "election_poll_errors", "election_snapshot_changes", "telegram_messages_sent", "telegram_messages_edited", "telegram_notifications_failed", "telegram_api_requests"} {
+		counter, e := otel.Meter("election-bot").Int64Counter(name)
+		if e != nil {
+			slog.Warn("metric instrument unavailable", "instrument", name)
+		} else {
+			counter.Add(context.Background(), 0)
+		}
+	}
 	return &Service{state: state, deliveries: deliveries, provider: provider, sender: sender, clock: clock, settings: settings}
 }
 func (s *Service) GetLatestResults(ctx context.Context) (election.Snapshot, error) {
@@ -123,7 +133,8 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 			return e
 		}
 	}
-	return s.state.Transaction(ctx, func(tx ports.Transaction) error {
+	acceptedChange := false
+	err = s.state.Transaction(ctx, func(tx ports.Transaction) error {
 		old, e := tx.Latest()
 		if e != nil && !errors.Is(e, ports.ErrNoSnapshot) {
 			return e
@@ -173,7 +184,7 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 		if !changed {
 			return nil
 		}
-		services.Counter(ctx, "election_snapshot_changes")
+		acceptedChange = true
 		subs, e := tx.Subscriptions()
 		if e != nil {
 			return e
@@ -198,10 +209,13 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 		}
 		return nil
 	})
+	if err == nil && acceptedChange {
+		services.Counter(ctx, "election_snapshot_changes")
+		slog.InfoContext(ctx, "election snapshot accepted", "operation", "election.process_snapshot")
+	}
+	return err
 }
 func (s *Service) PollElectionResults(ctx context.Context) (err error) {
-	ctx, finish := services.Operation(ctx, "election.poll")
-	defer func() { finish(err) }()
 	s.pollMu.Lock()
 	defer s.pollMu.Unlock()
 	status, e := s.state.Status(ctx)
@@ -211,6 +225,8 @@ func (s *Service) PollElectionResults(ctx context.Context) (err error) {
 	if status.NextPoll.After(s.clock.Now()) {
 		return nil
 	}
+	ctx, finish := services.Operation(ctx, "election.poll")
+	defer func() { finish(err) }()
 	services.Counter(ctx, "election_poll")
 	started := time.Now()
 	defer services.Duration(ctx, "election_poll_duration", started)
@@ -294,8 +310,6 @@ func (s *Service) refreshFreshness(ctx context.Context) error {
 	})
 }
 func (s *Service) PublishResultUpdates(ctx context.Context) (err error) {
-	ctx, finish := services.Operation(ctx, "notifications.publish")
-	defer func() { finish(err) }()
 	s.publishMu.Lock()
 	defer s.publishMu.Unlock()
 	if e := s.refreshFreshness(ctx); e != nil {
@@ -305,7 +319,29 @@ func (s *Service) PublishResultUpdates(ctx context.Context) (err error) {
 	if e != nil {
 		return e
 	}
+	if len(jobs) == 0 {
+		return nil
+	}
+	ctx, finish := services.Operation(ctx, "notifications.publish")
+	defer func() { finish(err) }()
 	for _, d := range jobs {
+		active := false
+		if e = s.state.Transaction(ctx, func(tx ports.Transaction) error {
+			sub, e := tx.Subscription(d.ChatID)
+			if errors.Is(e, ports.ErrNotFound) {
+				return nil
+			}
+			if e != nil {
+				return e
+			}
+			active = sub.Active && sub.Generation == d.Generation
+			return nil
+		}); e != nil {
+			return e
+		}
+		if !active {
+			continue
+		}
 		if e = ctx.Err(); e != nil {
 			return e
 		}

@@ -29,7 +29,13 @@ func FormatResults(s election.Snapshot, f Freshness, l *time.Location) string {
 		b.WriteString("🧪 <b>SIMULAÇÃO — dados fictícios</b>\n")
 	}
 	for _, c := range s.Candidates {
-		fmt.Fprintf(&b, "\n<b>%s</b> (%s) — %s\n%s — %s votos\n", html.EscapeString(c.Name), html.EscapeString(c.Number), html.EscapeString(c.Party), percent(c.Percentage), Number(c.Votes))
+		share := percent(c.Percentage)
+		if c.Destination != "" && c.Destination != "Válido" {
+			share = "Percentual válido indisponível (" + html.EscapeString(c.Destination) + ")"
+		} else if c.Destination == "Válido" {
+			share += " (calculado sobre votos válidos)"
+		}
+		fmt.Fprintf(&b, "\n<b>%s</b> (%s) — %s\n%s — %s votos\n", html.EscapeString(c.Name), html.EscapeString(c.Number), html.EscapeString(c.Party), share, Number(c.Votes))
 	}
 	_, gap, _ := s.Difference()
 	votes, _, _ := s.Difference()

@@ -11,13 +11,14 @@ type Values struct {
 	LastSuccess, Published           time.Time
 	Progress                         float64
 	ValidVotes, Subscribers, Pending int64
+	Failures                         int
 	OldestPending                    time.Time
 	Counting                         bool
 }
 
 func RegisterState(read func(context.Context) (Values, error)) error {
 	m := otel.Meter("election-bot")
-	names := []string{"election_last_success_timestamp", "election_publication_timestamp", "election_counted_sections_ratio", "election_valid_votes", "telegram_subscribers", "telegram_outbox_pending", "telegram_outbox_oldest_age", "election_counting_active"}
+	names := []string{"election_last_success_timestamp", "election_publication_timestamp", "election_counted_sections_ratio", "election_valid_votes", "telegram_subscribers", "telegram_outbox_pending", "telegram_outbox_oldest_age", "election_counting_active", "election_poll_consecutive_failures"}
 	gauges := make([]metric.Float64ObservableGauge, len(names))
 	for i, n := range names {
 		opts := []metric.Float64ObservableGaugeOption{}
@@ -41,7 +42,7 @@ func RegisterState(read func(context.Context) (Values, error)) error {
 		if e != nil {
 			return e
 		}
-		values := []float64{0, 0, v.Progress, float64(v.ValidVotes), float64(v.Subscribers), float64(v.Pending), 0, 0}
+		values := []float64{0, 0, v.Progress, float64(v.ValidVotes), float64(v.Subscribers), float64(v.Pending), 0, 0, float64(v.Failures)}
 		if !v.LastSuccess.IsZero() {
 			values[0] = float64(v.LastSuccess.Unix())
 		}

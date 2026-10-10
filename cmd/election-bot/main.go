@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"github.com/Diaszano/election-bot/internal/platform/config"
 	"github.com/Diaszano/election-bot/internal/platform/lifecycle"
+	"github.com/Diaszano/election-bot/internal/platform/observability"
+	"go.opentelemetry.io/otel"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,7 +41,25 @@ func main() {
 			e = x
 		} else {
 			defer os.RemoveAll(dir)
-			e = lifecycle.Simulate(ctx, filepath.Join(dir, "elections.db"))
+			c, x := config.Load()
+			if x != nil {
+				e = x
+			} else {
+				runtime, x := observability.Setup(ctx, c, "dev")
+				if x != nil {
+					e = x
+				} else {
+					operation, span := otel.Tracer("election-bot").Start(ctx, "simulation.run")
+					runtime.Logger.InfoContext(operation, "election-bot simulation started")
+					e = lifecycle.Simulate(operation, filepath.Join(dir, "elections.db"))
+					span.End()
+					shutdown, stop := context.WithTimeout(context.Background(), c.ShutdownTimeout)
+					if x = runtime.Shutdown(shutdown); x != nil {
+						runtime.Logger.Warn("telemetry shutdown incomplete")
+					}
+					stop()
+				}
+			}
 		}
 		if e == nil {
 			fmt.Println("election-bot simulation: PASS")

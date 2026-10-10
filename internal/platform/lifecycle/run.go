@@ -47,6 +47,7 @@ func Run(parent context.Context, c config.Config) error {
 			return v, e
 		}
 		v.LastSuccess = status.LastSuccess
+		v.Failures = status.Failures
 		snapshot, e := db.Latest(ctx)
 		if e != nil && !errors.Is(e, ports.ErrNoSnapshot) {
 			return v, e

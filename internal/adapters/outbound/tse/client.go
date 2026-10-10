@@ -9,6 +9,7 @@ import (
 	"github.com/Diaszano/election-bot/internal/application/ports"
 	"github.com/Diaszano/election-bot/internal/application/services"
 	"github.com/Diaszano/election-bot/internal/domain/election"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"io"
 	"math"
 	"net/http"
@@ -25,7 +26,13 @@ type Provider struct {
 }
 
 func New(c *http.Client, url string, id election.Identity, l *time.Location) *Provider {
-	return &Provider{c, url, id, l}
+	copy := *c
+	transport := c.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	copy.Transport = otelhttp.NewTransport(transport, otelhttp.WithSpanNameFormatter(func(string, *http.Request) string { return "tse.http" }))
+	return &Provider{&copy, url, id, l}
 }
 func (p *Provider) Fetch(ctx context.Context, v ports.Validators) (result ports.FetchResult, err error) {
 	ctx, finish := services.Operation(ctx, "tse.fetch_results")

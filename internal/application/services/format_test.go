@@ -20,3 +20,11 @@ func TestBrazilianFormattingAndSimulation(t *testing.T) {
 		t.Fatal("winner inferred")
 	}
 }
+
+func TestInvalidDestinationNeverLabelsZeroAsValidShare(t *testing.T) {
+	s := election.Snapshot{Source: "simulation", Candidates: []election.CandidateResult{{Name: "Invalid candidate", Number: "01", Destination: "Anulado", Votes: 100}}}
+	text := FormatResults(s, Freshness{}, time.UTC)
+	if strings.Contains(text, "0,00% — 100 votos") {
+		t.Fatal("invalid votes mislabeled as valid percentage")
+	}
+}

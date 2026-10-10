@@ -28,7 +28,7 @@ func Counter(ctx context.Context, name string) {
 	c.Add(ctx, 1)
 }
 func Duration(ctx context.Context, name string, start time.Time) {
-	h, e := otel.Meter("election-bot").Float64Histogram(name, metric.WithUnit("s"))
+	h, e := otel.Meter("election-bot").Float64Histogram(name, metric.WithUnit("s"), metric.WithExplicitBucketBoundaries(.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30))
 	if e != nil {
 		slog.Warn("metric instrument unavailable", "instrument", name)
 		return
