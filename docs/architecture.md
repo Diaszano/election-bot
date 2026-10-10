@@ -100,3 +100,9 @@ Telemetry exporters run asynchronously and do not gate local readiness or busine
 ## Deployment and storage
 
 Single replica only. Embedded migrations initialize the database; WAL, foreign keys, full synchronous writes and five-second busy timeout are enabled. The schema is scoped to this configured runoff; reuse for another election requires an explicit migration, not swapping a config code. Main messages are coalesced; milestone jobs remain separate. Retention/replay is an operator decision, never an automatic deletion of pending jobs. SIGTERM cancels workers and long polls, drains HTTP and shuts down providers/storage with bounded waits. Backups must include committed WAL state through the SQLite backup API.
+
+## Recovery boundaries
+
+Transient upstream transport/server failures receive at most three attempts per poll cycle with cancellable exponential jitter. Explicit Retry-After, missing endpoints, rate limits and malformed payloads are not immediately retried. Counting status overrides the pre-counting operational window; an accepted final status selects the slow final cadence. Freshness changes enqueue main edits independently of semantic election changes; validator refresh remains atomic without milestone duplication.
+
+Disabled Telegram transport leaves pending rows intact. A terminal command reply is logged and acknowledged after business processing; blocked/invalid chats are deactivated, while transient replies retain the update for retry. Delivery acknowledgements, reschedules and terminal failures are guarded by subscription generation and desired revision. The shared Telegram limiter rechecks server cooldown after waking.

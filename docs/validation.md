@@ -20,10 +20,10 @@ Date: 2026-10-10. Implementation branch: `feat/election-bot`. Architecture/spec/
 | Prometheus configuration and alert tests | PASS: running 3.15.0 promtool check/test |
 | Prometheus application metric query | PASS: `election_poll_total{service_name="election-bot"}` returned series |
 | Loki native OTLP ingestion | PASS: application log with trace ID returned |
-| Tempo correlated trace retrieval | PASS: trace `a3c4fa58a1cf875d53829867a88a0e93` retrieved |
+| Tempo correlated trace retrieval | PASS: new simulation trace `ca36f1062eecf7b971846896a983ebf5` retrieved, with its newly ingested correlated Loki logs |
 | Grafana provisioning and readiness probe | PASS: verifier checked source/dashboard UIDs and probe success |
 
-`go test -race ./...` passed across all packages, including the executable shutdown test. Independent-review results are appended after execution. Backend versions: Collector 0.162.0, Prometheus 3.15.0, Grafana 13.2.3, Tempo 3.1.0, Loki 3.7.8, probe exporter 0.29.0. Docker daemon access was initially denied but became available after permissions changed; Docker checks were subsequently executed.
+`go test -race ./...` passed across all packages, including the executable shutdown test. The final suite passed 60 tests across 19 packages; race detection and lint were rerun after review fixes. Backend versions: Collector 0.162.0, Prometheus 3.15.0, Grafana 13.2.3, Tempo 3.1.0, Loki 3.7.8, probe exporter 0.29.0. Docker daemon access was initially denied but became available after permissions changed; Docker checks were subsequently executed.
 
 ## Integration boundary
 
@@ -39,3 +39,11 @@ No live Telegram account/token was supplied; actual public Telegram delivery was
 - Prometheus rules are loaded and tested; operator paging is not configured without an Alertmanager destination.
 
 See [fixture provenance](../test/fixtures/tse/README.md), [TSE contract](tse-contract.md), [architecture](architecture.md) and [observability](observability.md).
+
+## Independent final review
+
+A fresh-context reviewer inspected `1704bf4..64b312a`. Five Important regressions were reproduced before fixing: unchanged-200 stale-warning recovery, old-generation terminal delivery failure, disabled transport consuming pending work, permanent command replies poisoning the shared command stream, and concurrent Retry-After cooldown bypass. Each permanent fix has a regression observed RED then GREEN. The polling finding was upgraded from Minor because recovery and latency are required behavior: transient fetches now have at most three attempts with cancellable exponential jitter; missing/rate-limited endpoints and explicit Retry-After do not receive immediate retries. Subsequent cadence uses the accepted counting/final status. A custom-port healthcheck regression was also fixed.
+
+Final validation after these changes: `go test ./...` (60 tests, 19 packages), `go test -race ./...`, `make lint` (including `go vet ./...`), `make build`, `make simulate`, and `go mod verify` passed. Both Compose configurations validated and the rebuilt image ran. Collector validation and Prometheus configuration/five alert rule checks and rule tests passed. Actual metrics, new correlated logs/traces, Grafana datasource/dashboard provisioning, and readiness were queried successfully.
+
+Deferred Minor: `/status` currently reports synchronization freshness and failures but omits source mode and publication-delay detail. Main results include those distinctions. The reviewer declined to judge verified runoff/winner semantics and public Telegram delivery: the closed production gate and fake-server testing remain the explicit boundary, with costs of unavailable official monitoring and unverified live-account behavior respectively.

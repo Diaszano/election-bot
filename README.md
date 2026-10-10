@@ -62,7 +62,7 @@ help - Mostrar ajuda
 
 New subscribers begin at current progress and receive subsequent milestone crossings, not historical push alerts. Their main message includes the latest reached milestone. Re-subscription preserves milestone history. A 100% alert does not announce a winner.
 
-Main edits are deduplicated by desired presentation revision. Separate alerts use durable at-least-once delivery: an accepted Telegram send followed by an ambiguous timeout or crash before database acknowledgement can duplicate a push. No transaction can make Telegram and SQLite commit atomically. Retries remain durable, and operator-visible permanent failures are retained. `/parar` cancels queued work; an already in-flight send can still arrive.
+Main edits are deduplicated by desired presentation revision. Separate alerts use durable at-least-once delivery: an accepted Telegram send followed by an ambiguous timeout or crash before database acknowledgement can duplicate a push. No transaction can make Telegram and SQLite commit atomically. Retries remain durable, and operator-visible permanent failures are retained. Disabling Telegram pauses publishing and preserves pending work; recording delivery is restricted to the isolated self-check. `/parar` cancels queued work; an already in-flight send can still arrive.
 
 ## Configuration
 
