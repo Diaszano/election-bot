@@ -1,0 +1,38 @@
+groups:
+  - name: election-bot
+    rules:
+      - alert: ElectionPollingFailure
+        expr: election_counting_active == 1 and on(service_name) election_poll_consecutive_failures > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Election polling has not synchronized
+          description: Check the TSE cooldown and endpoint provenance before retrying.
+      - alert: ElectionDataStale
+        expr: election_counting_active == 1 and on(service_name) ((time() - election_last_success_timestamp_seconds > 120) or (time() - election_publication_timestamp_seconds > 300))
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: Election data is stale during counting
+          description: Retain the last valid result and check source publication and connectivity.
+      - alert: TelegramDeliveryFailures
+        expr: increase(telegram_notifications_failed_total[5m]) > 5 and on(service_name) telegram_outbox_pending > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: Durable Telegram deliveries are retrying
+          description: Check Telegram Retry-After and pending or failed outbox state.
+      - alert: ElectionBotUnavailable
+        expr: probe_success{job="application-readiness"} == 0 or absent(probe_success{job="application-readiness"})
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: election-bot readiness is unavailable
+          description: Check application health and local SQLite storage.
+      - alert: TelemetryExportFailures
+        expr: rate(otelcol_exporter_send_failed_spans_total[5m]) > 0 or rate(otelcol_exporter_send_failed_log_records_total[5m]) > 0 or rate(otelcol_exporter_send_failed_metric_points_total[5m]) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Telemetry export is failing
+          description: Check Tempo Loki and Collector queues; business workers must remain active.
