@@ -93,6 +93,10 @@ func TestReleaseWorkflow(t *testing.T) {
 		if !strings.Contains(jobStr, "secrets.GITHUB_TOKEN") {
 			t.Errorf("release-please job must use secrets.GITHUB_TOKEN")
 		}
+		// Crucial safety gate: release-please MUST depend on verify-release-commit
+		if !strings.Contains(jobStr, "needs: verify-release-commit") && !strings.Contains(jobStr, "- verify-release-commit") {
+			t.Errorf("release-please must depend on verify-release-commit so that CI checks pass before creating tags/releases")
+		}
 	}
 
 	// 8. Verify Job 'verify-release-commit'
@@ -109,8 +113,8 @@ func TestReleaseWorkflow(t *testing.T) {
 	// 9. Verify Job 'publish-ghcr'
 	if job, ok := jobs["publish-ghcr"]; ok {
 		jobStr := strings.Join(job.lines, "\n")
-		if !strings.Contains(jobStr, "needs: verify-release-commit") && !strings.Contains(jobStr, "- verify-release-commit") {
-			t.Errorf("publish-ghcr must depend on verify-release-commit")
+		if !strings.Contains(jobStr, "needs:") || !strings.Contains(jobStr, "verify-release-commit") || !strings.Contains(jobStr, "release-please") {
+			t.Errorf("publish-ghcr must depend on verify-release-commit and release-please")
 		}
 		if !strings.Contains(jobStr, "ghcr.io") {
 			t.Errorf("publish-ghcr must log in and push to ghcr.io")
@@ -120,6 +124,11 @@ func TestReleaseWorkflow(t *testing.T) {
 		}
 		if !strings.Contains(jobStr, "aquasecurity/trivy-action") || !strings.Contains(jobStr, "CRITICAL") {
 			t.Errorf("publish-ghcr must scan with Trivy for CRITICAL vulnerabilities")
+		}
+		trivyIdx := strings.Index(jobStr, "aquasecurity/trivy-action")
+		pushIdx := strings.Index(jobStr, "push: true")
+		if trivyIdx == -1 || pushIdx == -1 || trivyIdx >= pushIdx {
+			t.Errorf("publish-ghcr must execute Trivy vulnerability scan before pushing images to GHCR")
 		}
 		if !strings.Contains(jobStr, "anchore/sbom-action") {
 			t.Errorf("publish-ghcr must generate SBOM via anchore/sbom-action")
@@ -132,8 +141,8 @@ func TestReleaseWorkflow(t *testing.T) {
 	// 10. Verify Job 'publish-release-assets'
 	if job, ok := jobs["publish-release-assets"]; ok {
 		jobStr := strings.Join(job.lines, "\n")
-		if !strings.Contains(jobStr, "needs: verify-release-commit") && !strings.Contains(jobStr, "- verify-release-commit") {
-			t.Errorf("publish-release-assets must depend on verify-release-commit")
+		if !strings.Contains(jobStr, "needs:") || !strings.Contains(jobStr, "verify-release-commit") || !strings.Contains(jobStr, "release-please") {
+			t.Errorf("publish-release-assets must depend on verify-release-commit and release-please")
 		}
 		if !strings.Contains(jobStr, "linux/amd64") || !strings.Contains(jobStr, "linux/arm64") {
 			t.Errorf("publish-release-assets must compile for linux/amd64 and linux/arm64")

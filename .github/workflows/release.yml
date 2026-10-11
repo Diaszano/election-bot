@@ -20,8 +20,127 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify-release-commit:
+    name: Verify Release Commit CI Status
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve target commit SHA
+        id: resolve
+        env:
+          RECOVERY_TAG: ${{ inputs.recovery_tag }}
+        run: |
+          TARGET_SHA="${{ github.sha }}"
+          TARGET_TAG=""
+
+          if [ -n "$RECOVERY_TAG" ]; then
+            echo "Operating in recovery mode for tag: $RECOVERY_TAG"
+            TARGET_TAG="$RECOVERY_TAG"
+            TARGET_SHA=$(git rev-list -n 1 "$TARGET_TAG" 2>/dev/null || true)
+            if [ -z "$TARGET_SHA" ]; then
+              echo "Error: Recovery tag $TARGET_TAG not found in git repository" >&2
+              exit 1
+            fi
+          else
+            echo "Operating on commit from push to main: $TARGET_SHA"
+          fi
+
+          echo "Target Commit SHA: $TARGET_SHA"
+          echo "commit_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify mandatory CI check runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ steps.resolve.outputs.commit_sha }}
+        run: |
+          echo "Verifying CI checks for commit SHA: $TARGET_SHA on $REPO"
+
+          # Required check names from CI workflow (.github/workflows/ci.yml)
+          REQUIRED_CHECKS=("standards" "go-quality" "security" "docker-validation")
+
+          # In GitHub Actions runtime, poll for completion up to timeout
+          MAX_WAIT_SECONDS=900
+          INTERVAL=15
+          ELAPSED=0
+
+          while [ $ELAPSED -lt $MAX_WAIT_SECONDS ]; do
+            CHECKS_JSON=$(gh api "repos/$REPO/commits/$TARGET_SHA/check-runs" --header "Accept: application/vnd.github+json" 2>/dev/null || echo '{"check_runs":[]}')
+            ALL_SUCCESS=true
+            ANY_FAILED=false
+
+            for check in "${REQUIRED_CHECKS[@]}"; do
+              STATUS=$(echo "$CHECKS_JSON" | jq -r --arg name "$check" '
+                .check_runs[] | select(.name == $name or (.name | test($name; "i"))) | .status
+              ' | head -n 1)
+              CONCLUSION=$(echo "$CHECKS_JSON" | jq -r --arg name "$check" '
+                .check_runs[] | select(.name == $name or (.name | test($name; "i"))) | .conclusion
+              ' | head -n 1)
+
+              if [ "$STATUS" = "completed" ]; then
+                if [ "$CONCLUSION" = "success" ]; then
+                  echo "Check '$check': success"
+                else
+                  echo "Check '$check': failed ($CONCLUSION)"
+                  ANY_FAILED=true
+                  ALL_SUCCESS=false
+                fi
+              elif [ -n "$STATUS" ]; then
+                echo "Check '$check': in progress ($STATUS)"
+                ALL_SUCCESS=false
+              else
+                # Fallback to combined commit status API
+                STATUS_JSON=$(gh api "repos/$REPO/commits/$TARGET_SHA/status" --header "Accept: application/vnd.github+json" 2>/dev/null || echo '{"statuses":[]}')
+                STATUS_STATE=$(echo "$STATUS_JSON" | jq -r --arg name "$check" '
+                  .statuses[] | select(.context == $name or (.context | test($name; "i"))) | .state
+                ' | head -n 1)
+                if [ "$STATUS_STATE" = "success" ]; then
+                  echo "Check '$check': success (status API)"
+                elif [ -n "$STATUS_STATE" ]; then
+                  echo "Check '$check': $STATUS_STATE (status API)"
+                  if [ "$STATUS_STATE" != "pending" ]; then
+                    ANY_FAILED=true
+                  fi
+                  ALL_SUCCESS=false
+                else
+                  echo "Check '$check': not yet started"
+                  ALL_SUCCESS=false
+                fi
+              fi
+            done
+
+            if [ "$ANY_FAILED" = "true" ]; then
+              echo "Error: One or more mandatory CI checks failed for $TARGET_SHA." >&2
+              exit 1
+            fi
+
+            if [ "$ALL_SUCCESS" = "true" ]; then
+              echo "All mandatory CI checks passed for $TARGET_SHA."
+              exit 0
+            fi
+
+            echo "Waiting for CI checks to complete ($ELAPSED/$MAX_WAIT_SECONDS seconds elapsed)..."
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "Error: Timed out waiting for mandatory CI checks on $TARGET_SHA." >&2
+          exit 1
+
   release-please:
     name: Release Please
+    needs: verify-release-commit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -40,101 +159,12 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  verify-release-commit:
-    name: Verify Release Commit CI Status
-    needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' || inputs.recovery_tag != '' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    outputs:
-      tag_name: ${{ steps.resolve.outputs.tag_name }}
-      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-
-      - name: Resolve target release tag and commit SHA
-        id: resolve
-        env:
-          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
-          RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
-          RECOVERY_TAG: ${{ inputs.recovery_tag }}
-        run: |
-          TARGET_TAG=""
-          TARGET_SHA=""
-
-          if [ -n "$RECOVERY_TAG" ]; then
-            echo "Operating in recovery mode for tag: $RECOVERY_TAG"
-            TARGET_TAG="$RECOVERY_TAG"
-            TARGET_SHA=$(git rev-list -n 1 "$TARGET_TAG" 2>/dev/null || true)
-            if [ -z "$TARGET_SHA" ]; then
-              echo "Error: Recovery tag $TARGET_TAG not found in git repository" >&2
-              exit 1
-            fi
-          elif [ -n "$RELEASE_TAG" ]; then
-            echo "Operating on newly created release: $RELEASE_TAG"
-            TARGET_TAG="$RELEASE_TAG"
-            TARGET_SHA="$RELEASE_SHA"
-            if [ -z "$TARGET_SHA" ]; then
-              TARGET_SHA=$(git rev-list -n 1 "$TARGET_TAG" 2>/dev/null || true)
-            fi
-          fi
-
-          if [ -z "$TARGET_TAG" ] || [ -z "$TARGET_SHA" ]; then
-            echo "Error: Failed to resolve release tag or commit SHA" >&2
-            exit 1
-          fi
-
-          echo "Target Release Tag: $TARGET_TAG"
-          echo "Target Commit SHA: $TARGET_SHA"
-          echo "tag_name=$TARGET_TAG" >> "$GITHUB_OUTPUT"
-          echo "commit_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Verify mandatory CI check runs
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          TARGET_SHA: ${{ steps.resolve.outputs.commit_sha }}
-        run: |
-          echo "Verifying CI checks for commit SHA: $TARGET_SHA on $REPO"
-
-          # Required check names from CI workflow (.github/workflows/ci.yml)
-          REQUIRED_CHECKS=("standards" "go-quality" "security" "docker-validation")
-
-          # Retrieve check runs via GitHub CLI API
-          CHECKS_JSON=$(gh api "repos/$REPO/commits/$TARGET_SHA/check-runs" --header "Accept: application/vnd.github+json" || echo '{"check_runs":[]}')
-
-          for check in "${REQUIRED_CHECKS[@]}"; do
-            echo "Verifying required check: $check..."
-            # Check if any check run matching the name or job has concluded with success
-            MATCH=$(echo "$CHECKS_JSON" | jq -r --arg name "$check" '
-              .check_runs[] | select(.name == $name or (.name | test($name; "i"))) | select(.status == "completed" and .conclusion == "success") | .name
-            ' | head -n 1)
-
-            if [ -z "$MATCH" ]; then
-              echo "Required check run '$check' not found or not successful on commit $TARGET_SHA."
-              echo "Checking combined commit status API as fallback..."
-              STATUS_JSON=$(gh api "repos/$REPO/commits/$TARGET_SHA/status" --header "Accept: application/vnd.github+json" || echo '{"statuses":[]}')
-              STATUS_MATCH=$(echo "$STATUS_JSON" | jq -r --arg name "$check" '
-                .statuses[] | select(.context == $name or (.context | test($name; "i"))) | select(.state == "success") | .context
-              ' | head -n 1)
-              if [ -z "$STATUS_MATCH" ]; then
-                echo "Warning: Required check '$check' not confirmed via API (this may occur on synthetic or initial tag pushes in tests)."
-              else
-                echo "Required check '$check' confirmed successful via commit status ($STATUS_MATCH)."
-              fi
-            else
-              echo "Required check '$check' confirmed successful via check-run ($MATCH)."
-            fi
-          done
-
   publish-ghcr:
     name: Build & Publish Container Images (GHCR)
-    needs: verify-release-commit
+    needs:
+      - verify-release-commit
+      - release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' || inputs.recovery_tag != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -143,10 +173,29 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Resolve target publish metadata
+        id: pubmeta
+        env:
+          REL_TAG: ${{ needs.release-please.outputs.tag_name }}
+          REC_TAG: ${{ inputs.recovery_tag }}
+          REL_SHA: ${{ needs.release-please.outputs.sha }}
+          VER_SHA: ${{ needs.verify-release-commit.outputs.commit_sha }}
+        run: |
+          TARGET_TAG="${REL_TAG:-$REC_TAG}"
+          TARGET_SHA="${REL_SHA:-$VER_SHA}"
+          if [ -z "$TARGET_TAG" ] || [ -z "$TARGET_SHA" ]; then
+            echo "Error: Missing target tag or commit SHA for publishing" >&2
+            exit 1
+          fi
+          echo "Publish Tag: $TARGET_TAG"
+          echo "Publish Commit SHA: $TARGET_SHA"
+          echo "tag_name=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.verify-release-commit.outputs.commit_sha }}
+          ref: ${{ steps.pubmeta.outputs.commit_sha }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@49b3e5e020112a145129572531065757659587a8 # v3.2.0
@@ -170,19 +219,19 @@ jobs:
             latest=false
           tags: |
             # Exact semver release tag, e.g. v0.1.0
-            type=raw,value=${{ needs.verify-release-commit.outputs.tag_name }}
+            type=raw,value=${{ steps.pubmeta.outputs.tag_name }}
             # Stripped prefix semver tag, e.g. 0.1.0
-            type=match,pattern=v(.*),group=1,value=${{ needs.verify-release-commit.outputs.tag_name }}
+            type=match,pattern=v(.*),group=1,value=${{ steps.pubmeta.outputs.tag_name }}
             # Minor series floating tag, e.g. 0.1
-            type=match,pattern=v([0-9]+\.[0-9]+)\.[0-9]+,group=1,value=${{ needs.verify-release-commit.outputs.tag_name }}
+            type=match,pattern=v([0-9]+\.[0-9]+)\.[0-9]+,group=1,value=${{ steps.pubmeta.outputs.tag_name }}
             # Reserve 'latest' tag strictly for stable releases >= 1.0.0
-            type=raw,value=latest,enable=${{ !startsWith(needs.verify-release-commit.outputs.tag_name, 'v0.') && !contains(needs.verify-release-commit.outputs.tag_name, '-') }}
+            type=raw,value=latest,enable=${{ !startsWith(steps.pubmeta.outputs.tag_name, 'v0.') && !contains(steps.pubmeta.outputs.tag_name, '-') }}
           labels: |
             org.opencontainers.image.title=election-bot
             org.opencontainers.image.description=Persistent, observable election results bot for Brazil's presidential runoff (Telegram & WhatsApp)
             org.opencontainers.image.url=https://github.com/${{ github.repository }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ needs.verify-release-commit.outputs.commit_sha }}
+            org.opencontainers.image.revision=${{ steps.pubmeta.outputs.commit_sha }}
 
       - name: Build local container image for Trivy scan
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
@@ -192,8 +241,8 @@ jobs:
           tags: election-bot:scan
           push: false
           build-args: |
-            VERSION=${{ needs.verify-release-commit.outputs.tag_name }}
-            COMMIT=${{ needs.verify-release-commit.outputs.commit_sha }}
+            VERSION=${{ steps.pubmeta.outputs.tag_name }}
+            COMMIT=${{ steps.pubmeta.outputs.commit_sha }}
 
       - name: Scan container image with Trivy
         uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
@@ -214,15 +263,15 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ needs.verify-release-commit.outputs.tag_name }}
-            COMMIT=${{ needs.verify-release-commit.outputs.commit_sha }}
+            VERSION=${{ steps.pubmeta.outputs.tag_name }}
+            COMMIT=${{ steps.pubmeta.outputs.commit_sha }}
 
       - name: Generate Software Bill of Materials (SBOM)
         uses: anchore/sbom-action@fc6a014e7a2b9f62c8fb6a5ca45318b849319e7f # v0.17.9
         with:
-          image: ghcr.io/${{ github.repository }}:${{ needs.verify-release-commit.outputs.tag_name }}
-          artifact-name: sbom-${{ needs.verify-release-commit.outputs.tag_name }}.spdx.json
-          output-file: sbom-${{ needs.verify-release-commit.outputs.tag_name }}.spdx.json
+          image: ghcr.io/${{ github.repository }}:${{ steps.pubmeta.outputs.tag_name }}
+          artifact-name: sbom-${{ steps.pubmeta.outputs.tag_name }}.spdx.json
+          output-file: sbom-${{ steps.pubmeta.outputs.tag_name }}.spdx.json
 
       - name: Generate build provenance attestation
         uses: actions/attest-build-provenance@c074443f1a5fb4aee83904b7124879ae09f19383 # v2.2.2
@@ -233,16 +282,38 @@ jobs:
 
   publish-release-assets:
     name: Build & Publish Release Assets
-    needs: verify-release-commit
+    needs:
+      - verify-release-commit
+      - release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' || inputs.recovery_tag != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: write
     steps:
+      - name: Resolve target publish metadata
+        id: pubmeta
+        env:
+          REL_TAG: ${{ needs.release-please.outputs.tag_name }}
+          REC_TAG: ${{ inputs.recovery_tag }}
+          REL_SHA: ${{ needs.release-please.outputs.sha }}
+          VER_SHA: ${{ needs.verify-release-commit.outputs.commit_sha }}
+        run: |
+          TARGET_TAG="${REL_TAG:-$REC_TAG}"
+          TARGET_SHA="${REL_SHA:-$VER_SHA}"
+          if [ -z "$TARGET_TAG" ] || [ -z "$TARGET_SHA" ]; then
+            echo "Error: Missing target tag or commit SHA for publishing" >&2
+            exit 1
+          fi
+          echo "Publish Tag: $TARGET_TAG"
+          echo "Publish Commit SHA: $TARGET_SHA"
+          echo "tag_name=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ needs.verify-release-commit.outputs.commit_sha }}
+          ref: ${{ steps.pubmeta.outputs.commit_sha }}
 
       - name: Set up Go
         uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
@@ -252,8 +323,8 @@ jobs:
 
       - name: Cross-compile static Go binaries
         env:
-          VERSION: ${{ needs.verify-release-commit.outputs.tag_name }}
-          COMMIT: ${{ needs.verify-release-commit.outputs.commit_sha }}
+          VERSION: ${{ steps.pubmeta.outputs.tag_name }}
+          COMMIT: ${{ steps.pubmeta.outputs.commit_sha }}
         run: |
           mkdir -p dist
           BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
@@ -269,7 +340,7 @@ jobs:
 
       - name: Package tarball archives and generate SHA256 checksums
         env:
-          TAG: ${{ needs.verify-release-commit.outputs.tag_name }}
+          TAG: ${{ steps.pubmeta.outputs.tag_name }}
         run: |
           cd dist
           # Package amd64
@@ -284,7 +355,7 @@ jobs:
       - name: Upload release assets to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.verify-release-commit.outputs.tag_name }}
+          TAG: ${{ steps.pubmeta.outputs.tag_name }}
         run: |
           echo "Uploading release assets for $TAG..."
           gh release upload "$TAG" \

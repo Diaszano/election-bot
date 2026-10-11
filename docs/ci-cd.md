@@ -185,28 +185,26 @@ All four jobs must succeed for a PR to be mergeable:
 
 The release workflow is defined in [`.github/workflows/release.yml`](../.github/workflows/release.yml) and runs on pushes to `main` and `workflow_dispatch`.
 
-### 6.1 Release Please Lifecycle with `GITHUB_TOKEN`
+### 6.1 Release Safety & Pre-Tag CI Verification Gate
 
-Release automation uses `googleapis/release-please-action` operating under standard `GITHUB_TOKEN` permissions:
+To ensure that unverified commits are NEVER tagged or released, the release workflow enforces a pre-release gate:
 
-1. **Release PR Creation**: When conventional commits merge into `main`, Release Please computes the next version, updates `CHANGELOG.md` and `.release-please-manifest.json`, and opens or updates a Release PR titled `chore(main): release X.Y.Z`.
-2. **Approval & Merging of Release PR**:
-   - By default, GitHub does not trigger workflow runs for pull requests created by the standard `GITHUB_TOKEN`.
-   - **Operator Action**: When a Release PR is opened, a maintainer reviews the changelog and version bump, triggers CI checks via GitHub's standard PR interface (or comments/pushes if configured), and merges the PR once checks pass.
-3. **Tagging and GitHub Release**:
-   - Merging the Release PR to `main` triggers `release.yml`.
-   - Release Please detects the merge commit, tags the repository (e.g. `v0.1.0`), creates the GitHub Release, and outputs `release_created: true`, `tag_name: v0.1.0`, and `sha`.
+1. **Pre-Release Verification (`verify-release-commit`)**:
+   - Executes FIRST upon push to `main` (or via `workflow_dispatch` with `recovery_tag`).
+   - Resolves the target commit SHA (`github.sha` on push to `main`).
+   - Queries the GitHub Checks and Status APIs, polling until all four mandatory CI jobs (`standards`, `go-quality`, `security`, `docker-validation`) have completed with `success`.
+   - If any check fails, times out, or is missing, the workflow terminates immediately with an error.
 
-### 6.2 Exact Release Commit Verification
+2. **Release Please Execution (`release-please`)**:
+   - Depends directly on `verify-release-commit` (`needs: verify-release-commit`).
+   - Runs ONLY AFTER all mandatory CI checks for the exact commit SHA have succeeded.
+   - When conventional commits merge into `main`, Release Please computes the next version, updates `CHANGELOG.md` and `.release-please-manifest.json`, and opens or updates a Release PR titled `chore(main): release X.Y.Z`.
+   - When a Release PR itself is merged into `main`, Release Please detects the merge commit, tags the repository (e.g. `v0.1.0`), creates the GitHub Release, and outputs `release_created: true`, `tag_name: v0.1.0`, and `sha`.
+   - Because `release-please` runs after `verify-release-commit`, **no Git tag or GitHub Release can be created unless the release commit has completely passed all CI checks**.
 
-To ensure zero divergence between what was tested and what is published, the release job does not build from `HEAD`. Instead:
-1. Job `verify-release-commit` extracts the exact commit SHA associated with the release tag (`steps.release.outputs.sha`).
-2. It queries the GitHub Checks API to confirm that the exact SHA has successful runs for all four mandatory CI jobs:
-   - `standards`
-   - `go-quality`
-   - `security`
-   - `docker-validation`
-3. If any check is pending, missing, or failed, the release publishing pipeline immediately halts.
+3. **Downstream Publishing**:
+   - Jobs `publish-ghcr` and `publish-release-assets` depend on both `verify-release-commit` and `release-please`.
+   - They execute only when `release_created: true` or when operating in manual recovery mode.
 
 ### 6.3 Docker Publishing to GHCR
 
