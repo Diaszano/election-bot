@@ -207,7 +207,6 @@ func (m *ConnectionManager) Run(ctx context.Context) error {
 						if err = m.stateStore.SaveChannelState(ctx, subscription.WhatsApp, state); err != nil {
 							return err
 						}
-						break
 					case ConnectionAuthenticationRequired:
 						return m.requireAuthentication(ctx)
 					case ConnectionRestricted, ConnectionOutdated:
@@ -227,7 +226,6 @@ func (m *ConnectionManager) Run(ctx context.Context) error {
 							return err
 						}
 						m.setState(StateDisconnected)
-						break
 					}
 				}
 				if !state.PausedUntil.IsZero() || m.State() == StateReconnecting {

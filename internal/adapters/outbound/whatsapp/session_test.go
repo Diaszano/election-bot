@@ -21,7 +21,7 @@ func TestSelectAllStoredDevices(t *testing.T) {
 	if err != nil || got != one || pair {
 		t.Fatalf("single selection: device=%p pair=%t err=%v", got, pair, err)
 	}
-	if _, _, err = selectDevice([]*store.Device{one, &store.Device{}}); err == nil {
+	if _, _, err = selectDevice([]*store.Device{one, {}}); err == nil {
 		t.Fatal("ambiguous multi-device store was accepted")
 	}
 }
