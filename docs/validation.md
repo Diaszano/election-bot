@@ -51,8 +51,10 @@ Date: 2026-10-10 / 2026-10-11. Implementation branches: `feat/election-bot` (Tel
 | **Recovery simulation (`make simulate`)** | Deterministic simulation ran and passed (`election-bot simulation: PASS`). | PASS |
 | **Dependency verification (`go mod verify`)** | All dependencies matched pinned module hashes. | PASS |
 | **Pure-Go binary (`CGO_ENABLED=0 go build`)** | Built pure-Go binary without CGO dependencies. | PASS |
-| **Docker Compose configuration** | `docker compose -f compose.yaml config -q` and merged `docker compose -f compose.yaml -f compose.observability.yaml config -q` validated cleanly. | PASS |
 | **Formatting & Git whitespace** | `gofmt -l .` returned 0 unformatted files; `git diff --check` reported 0 whitespace errors. | PASS |
+| **Operational Docker validation** | Image `election-bot:latest` started with `WHATSAPP_ENABLED=false` and served `/health/ready` (200 OK); started with `WHATSAPP_ENABLED=true` (without session DB) and isolated connection failure (`not_paired`), continuing to serve `/health/ready` and TSE polling without crash. | PASS |
+| **Live Grafana & OTel stack verification** | Observability stack started via Docker Compose; verified provisioning of `election-bot-overview` and `election-bot-telemetry` dashboards; verified that queries use actual exported metric names (`whatsapp_connection_state`, `whatsapp_messages_sent_total`, etc.). | PASS |
+| **Database migration & backup recovery** | Verified `migrateV2` on populated schema 1; verified row preservation, collision keys (`legacy:<id>`), foreign key integrity (`PRAGMA foreign_key_check`), rollback on injected failure (`TestMigrationFailureRollsBack`), and full restore from pre-migration backup (`TestMigrationBackupRestore`). `migrations/001_initial.sql` remains byte-for-byte identical. | PASS |
 
 ## Integration boundary and limitations
 
