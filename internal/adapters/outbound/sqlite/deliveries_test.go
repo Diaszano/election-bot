@@ -123,6 +123,60 @@ func TestAttemptRetryIdentity(t *testing.T) {
 	}
 }
 
+func TestChannelStatisticsOnlyCountSelectedChannel(t *testing.T) {
+	ctx := context.Background()
+	store := newWAStore(t, "channel-statistics.db")
+	wa := newWAIdentity()
+	tg, _ := subscription.NewIdentity(fixtureElection, subscription.Telegram, "123")
+	activate(t, ctx, store, wa, 1)
+	activate(t, ctx, store, tg, 1)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.Transaction(ctx, func(tx ports.Transaction) error {
+		if err := tx.Enqueue(notification.Delivery{Identity: wa, Generation: 1, Kind: "main", Revision: "r1", Text: "summary", Due: now}); err != nil {
+			return err
+		}
+		if err := tx.Enqueue(notification.Delivery{Identity: tg, Generation: 1, Kind: "main", Revision: "t1", Text: "summary", Due: now}); err != nil {
+			return err
+		}
+		return tx.Enqueue(notification.Delivery{Identity: wa, Generation: 1, Kind: "milestone", Milestone: 25, Revision: "m25", Text: "milestone", Due: now})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.PendingChannel(ctx, subscription.WhatsApp, now.Add(time.Second), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var main notification.Delivery
+	for _, job := range jobs {
+		if job.Kind == "main" {
+			main = job
+			break
+		}
+	}
+	attempt, err := store.PrepareAttempt(ctx, main, notification.Send, "request-statistics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.CompleteAttempt(ctx, main, attempt, notification.Acceptance{Ref: notification.MessageRef{ID: "remote", OriginalSentAt: now}, Operation: notification.Send, AcceptedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	subscribers, pending, failed, last, err := store.ChannelStatistics(ctx, subscription.WhatsApp)
+	if err != nil || subscribers != 1 || pending != 1 || failed != 0 || !last.Equal(now) {
+		t.Fatalf("WhatsApp stats subscribers=%d pending=%d failed=%d last=%s err=%v", subscribers, pending, failed, last, err)
+	}
+	for _, job := range jobs {
+		if job.Kind == "milestone" {
+			if err = store.MarkDeliveryUndeliverable(ctx, job, "blocked"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_, pending, failed, _, err = store.ChannelStatistics(ctx, subscription.WhatsApp)
+	if err != nil || pending != 0 || failed != 1 {
+		t.Fatalf("failed work stats pending=%d failed=%d err=%v", pending, failed, err)
+	}
+}
+
 func TestCoalescedRevisionRetainsAttempt(t *testing.T) {
 	ctx := context.Background()
 	store := newWAStore(t, "coalesce.db")

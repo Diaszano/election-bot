@@ -434,3 +434,14 @@ func TestMilestonesBypassDigestNotPacing(t *testing.T) {
 		t.Fatalf("milestone did not bypass digest deadline: main=%d milestone=%d", fakeSender.mainSends, fakeSender.milestoneSends)
 	}
 }
+
+func TestWhatsAppTelemetryErrorSanitization(t *testing.T) {
+	private := "5511999999999 private-message qr-payload"
+	got := safeWhatsAppSpanError(fmt.Errorf("%s: %w", private, &ports.ExternalError{Kind: "transient"}))
+	if got == nil || got.Error() != "external operation: transient" || strings.Contains(got.Error(), private) {
+		t.Fatalf("unsafe span error: %v", got)
+	}
+	if got = safeWhatsAppSpanError(&ports.ExternalError{Kind: "not_modified"}); got != nil {
+		t.Fatalf("not-modified response recorded as error: %v", got)
+	}
+}

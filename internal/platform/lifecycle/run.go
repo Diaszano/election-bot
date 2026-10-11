@@ -15,6 +15,7 @@ import (
 	telegramapi "github.com/Diaszano/election-bot/internal/adapters/outbound/telegram"
 	waadapter "github.com/Diaszano/election-bot/internal/adapters/outbound/whatsapp"
 	"github.com/Diaszano/election-bot/internal/application/ports"
+	"github.com/Diaszano/election-bot/internal/application/services"
 	"github.com/Diaszano/election-bot/internal/application/usecases"
 	"github.com/Diaszano/election-bot/internal/domain/election"
 	"github.com/Diaszano/election-bot/internal/domain/notification"
@@ -63,8 +64,18 @@ func Run(parent context.Context, c config.Config) error {
 		v.ValidVotes = snapshot.Snapshot.Valid
 		v.Counting = snapshot.Snapshot.Status == election.Counting
 		v.Subscribers, v.Pending, v.OldestPending, e = db.Statistics(ctx)
+		if e == nil && c.WhatsAppEnabled && c.WhatsAppTelemetryEnabled {
+			var last time.Time
+			v.WhatsAppSubscribers, v.WhatsAppPending, v.WhatsAppFailed, last, e = db.ChannelStatistics(ctx, subscription.WhatsApp)
+			if e == nil {
+				v.WhatsAppLastSuccess = last
+				state, stateErr := db.ReadChannelState(ctx, subscription.WhatsApp)
+				e = stateErr
+				v.WhatsAppConnectionState = observability.WhatsAppConnectionStateValue(state.AuthenticationRequired, state.PauseReason)
+			}
+		}
 		return v, e
-	}); e != nil {
+	}, c.WhatsAppEnabled && c.WhatsAppTelemetryEnabled); e != nil {
 		logger.Warn("state metrics initialization failed")
 	}
 
@@ -130,23 +141,37 @@ func Run(parent context.Context, c config.Config) error {
 				_ = waClient.Close()
 				waClient = nil
 			} else {
-				waPublisher := usecases.NewPublisher(subscription.WhatsApp, db, waClient, ports.RealClock{}, notification.Policy{EditMin: c.WhatsAppEditMinInterval, Digest: c.WhatsAppDigestInterval, RecipientMin: c.WhatsAppRecipientMinInterval, GlobalMin: time.Second})
+				waPublisher := usecases.NewPublisher(subscription.WhatsApp, db, waClient, ports.RealClock{}, notification.Policy{EditMin: c.WhatsAppEditMinInterval, Digest: c.WhatsAppDigestInterval, RecipientMin: c.WhatsAppRecipientMinInterval, GlobalMin: time.Second}, usecases.WithTelemetry(c.WhatsAppTelemetryEnabled))
 				start(func() {
 					scheduler.Run(ctx, c.NotificationInterval, "notifications.publish.whatsapp", logger, func(ctx context.Context) error { return waPublisher.Publish(ctx) })
 				})
-				manager := waadapter.NewConnectionManager(waClient, db, time.Now, waadapter.ConnectionSettings{Enabled: true, ReconnectEnabled: c.WhatsAppReconnectEnabled, ConnectTimeout: c.WhatsAppConnectTimeout}, nil)
+				manager := waadapter.NewConnectionManager(waClient, db, time.Now, waadapter.ConnectionSettings{Enabled: true, ReconnectEnabled: c.WhatsAppReconnectEnabled, TelemetryEnabled: c.WhatsAppTelemetryEnabled, ConnectTimeout: c.WhatsAppConnectTimeout}, nil)
 				start(func() {
 					if err := manager.Run(ctx); err != nil && ctx.Err() == nil {
 						logger.Warn("WhatsApp connection manager stopped", "reason", "connection_unavailable")
 					}
 				})
+				if c.WhatsAppTelemetryEnabled {
+					start(func() {
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case state := <-manager.Changes():
+								if state == waadapter.StateReconnecting {
+									services.Counter(ctx, "whatsapp_reconnects")
+								}
+							}
+						}
+					})
+				}
 				if accountReady {
 					resolver := waadapter.NewIdentityResolver(session.Device(), election.Identity{Year: 2026, Round: 2, Code: "6258", Scope: "br", Office: 1})
 					allowed := make([]string, 0, len(c.WhatsAppAllowedRecipients))
 					for _, identity := range c.WhatsAppAllowedRecipients {
 						allowed = append(allowed, identity.Recipient)
 					}
-					handler := waCommands.NewHandler(svc, resolver, allowed, logger)
+					handler := waCommands.NewHandler(svc, resolver, allowed, logger, c.WhatsAppTelemetryEnabled)
 					start(func() {
 						for {
 							select {

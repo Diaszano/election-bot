@@ -12,12 +12,24 @@ import (
 	"github.com/Diaszano/election-bot/internal/adapters/outbound/sqlite"
 	waadapter "github.com/Diaszano/election-bot/internal/adapters/outbound/whatsapp"
 	"github.com/Diaszano/election-bot/internal/application/ports"
+	"github.com/Diaszano/election-bot/internal/application/services"
 	"github.com/Diaszano/election-bot/internal/domain/election"
 	"github.com/Diaszano/election-bot/internal/domain/subscription"
 	"github.com/Diaszano/election-bot/internal/platform/config"
 )
 
 func PairWhatsApp(ctx context.Context, c config.Config, out io.Writer, terminal bool, render waadapter.QRRenderer) (err error) {
+	finish := func(error) {}
+	if c.WhatsAppTelemetryEnabled {
+		ctx, finish = services.Operation(ctx, "whatsapp.pair")
+	}
+	defer func() {
+		if err != nil {
+			finish(errors.New("WhatsApp pairing failed"))
+		} else {
+			finish(nil)
+		}
+	}()
 	session, err := waadapter.OpenSession(ctx, c.WhatsAppSessionDB)
 	if err != nil {
 		return err
@@ -35,6 +47,17 @@ func PairWhatsApp(ctx context.Context, c config.Config, out io.Writer, terminal 
 }
 
 func LogoutWhatsApp(ctx context.Context, c config.Config) (err error) {
+	finish := func(error) {}
+	if c.WhatsAppTelemetryEnabled {
+		ctx, finish = services.Operation(ctx, "whatsapp.disconnect")
+	}
+	defer func() {
+		if err != nil {
+			finish(errors.New("WhatsApp logout failed"))
+		} else {
+			finish(nil)
+		}
+	}()
 	session, err := waadapter.OpenSession(ctx, c.WhatsAppSessionDB)
 	if err != nil {
 		return err

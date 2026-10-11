@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	telegramapi "github.com/Diaszano/election-bot/internal/adapters/outbound/telegram"
+	"github.com/Diaszano/election-bot/internal/application/services"
 	"github.com/Diaszano/election-bot/internal/platform/config"
 	"go.opentelemetry.io/otel"
 	logpb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -101,6 +102,11 @@ func TestAllSignalsExportAndCorrelation(t *testing.T) {
 	counter, _ := otel.Meter("election-bot").Int64Counter("election_poll")
 	counter.Add(ctx, 1)
 	span.End()
+	waCtx, waSpan := otel.Tracer("election-bot").Start(context.Background(), "whatsapp.send_message")
+	services.Counter(waCtx, "whatsapp_messages_sent")
+	services.Duration(waCtx, "whatsapp_message_send_duration", time.Now().Add(-25*time.Millisecond))
+	runtime.Logger.InfoContext(waCtx, "WhatsApp API accepted a message")
+	waSpan.End()
 	timeout, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if e = runtime.Shutdown(timeout); e != nil {
@@ -120,7 +126,7 @@ func TestAllSignalsExportAndCorrelation(t *testing.T) {
 	if !strings.Contains(joined, traceID) {
 		t.Fatal("missing log/trace correlation ID")
 	}
-	for _, v := range []string{"election-bot", "elections", "test-version", "election_poll", "trace_id", "span_id"} {
+	for _, v := range []string{"election-bot", "elections", "test-version", "election_poll", "whatsapp_messages_sent", "whatsapp_message_send_duration", "whatsapp.send_message", "trace_id", "span_id"} {
 		if !strings.Contains(joined, v) {
 			t.Fatal("missing exported field", v)
 		}

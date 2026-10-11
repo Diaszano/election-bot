@@ -11,6 +11,9 @@ import (
 
 	"github.com/Diaszano/election-bot/internal/application/ports"
 	"github.com/Diaszano/election-bot/internal/domain/subscription"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type ConnectionState string
@@ -49,8 +52,8 @@ type Connection interface {
 }
 type WaitFunc func(context.Context, time.Duration) error
 type ConnectionSettings struct {
-	Enabled, ReconnectEnabled         bool
-	ConnectTimeout, ReconnectCooldown time.Duration
+	Enabled, ReconnectEnabled, TelemetryEnabled bool
+	ConnectTimeout, ReconnectCooldown           time.Duration
 }
 type ConnectionManager struct {
 	connection Connection
@@ -108,7 +111,15 @@ func (m *ConnectionManager) Run(ctx context.Context) error {
 		m.setState(StateNotPaired)
 		return nil
 	}
-	defer m.connection.Disconnect()
+	defer func() {
+		if m.settings.TelemetryEnabled {
+			_, span := otel.Tracer("election-bot").Start(ctx, "whatsapp.disconnect")
+			m.connection.Disconnect()
+			span.End()
+			return
+		}
+		m.connection.Disconnect()
+	}()
 	state, err := m.stateStore.ReadChannelState(ctx, subscription.WhatsApp)
 	if err != nil {
 		return err
@@ -139,7 +150,22 @@ func (m *ConnectionManager) Run(ctx context.Context) error {
 				m.setState(StateReconnecting)
 			}
 			connectCtx, cancel := context.WithTimeout(ctx, m.settings.ConnectTimeout)
+			var connectSpan trace.Span
+			if m.settings.TelemetryEnabled {
+				name := "whatsapp.connect"
+				if attempt > 0 {
+					name = "whatsapp.reconnect"
+				}
+				connectCtx, connectSpan = otel.Tracer("election-bot").Start(connectCtx, name)
+			}
 			err = m.connection.Connect(connectCtx)
+			if connectSpan != nil {
+				if err != nil {
+					connectSpan.RecordError(&ports.ExternalError{Kind: "connection_failed"})
+					connectSpan.SetStatus(codes.Error, "connection failed")
+				}
+				connectSpan.End()
+			}
 			cancel()
 			if err != nil {
 				if ctx.Err() != nil {

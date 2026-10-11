@@ -358,6 +358,20 @@ func (s *Store) Statistics(ctx context.Context) (subscribers, pending int64, old
 	return
 }
 
+func (s *Store) ChannelStatistics(ctx context.Context, channel subscription.Channel) (subscribers, pending, failed int64, lastSuccess time.Time, err error) {
+	var last int64
+	err = s.db.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM subscriptions WHERE election_key=? AND channel=? AND active=1),
+		(SELECT count(*) FROM outbox o JOIN subscriptions s ON s.id=o.subscription_id WHERE s.election_key=? AND s.channel=? AND o.state='pending'),
+		(SELECT count(*) FROM outbox o JOIN subscriptions s ON s.id=o.subscription_id WHERE s.election_key=? AND s.channel=? AND o.state IN ('failed','undeliverable')),
+		COALESCE((SELECT max(a.accepted_at) FROM delivery_attempts a JOIN outbox o ON o.id=a.outbox_id JOIN subscriptions s ON s.id=o.subscription_id WHERE s.election_key=? AND s.channel=?),0)`,
+		electionKey(s.election), channel, electionKey(s.election), channel, electionKey(s.election), channel, electionKey(s.election), channel).Scan(&subscribers, &pending, &failed, &last)
+	if last != 0 {
+		lastSuccess = unixTime(last)
+	}
+	return
+}
+
 func safeKind(value string) string {
 	value = strings.ToLower(value)
 	if value == "" || len(value) > 64 {

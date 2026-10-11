@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/Diaszano/election-bot/internal/domain/election"
 	"github.com/Diaszano/election-bot/internal/domain/notification"
 	"github.com/Diaszano/election-bot/internal/domain/subscription"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type InboundMessage = waadapter.InboundMessage
@@ -18,13 +21,14 @@ type IdentityResolver interface {
 	Resolve(context.Context, string, string, string) (subscription.Identity, bool, error)
 }
 type Handler struct {
-	actions  *usecases.Service
-	resolver IdentityResolver
-	allowed  map[string]bool
-	logger   *slog.Logger
+	actions   *usecases.Service
+	resolver  IdentityResolver
+	allowed   map[string]bool
+	logger    *slog.Logger
+	telemetry bool
 }
 
-func NewHandler(actions *usecases.Service, resolver IdentityResolver, allowed []string, logger *slog.Logger) *Handler {
+func NewHandler(actions *usecases.Service, resolver IdentityResolver, allowed []string, logger *slog.Logger, telemetry ...bool) *Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -35,7 +39,11 @@ func NewHandler(actions *usecases.Service, resolver IdentityResolver, allowed []
 			set[id.Recipient] = true
 		}
 	}
-	return &Handler{actions: actions, resolver: resolver, allowed: set, logger: logger}
+	enabled := true
+	if len(telemetry) > 0 {
+		enabled = telemetry[0]
+	}
+	return &Handler{actions: actions, resolver: resolver, allowed: set, logger: logger, telemetry: enabled}
 }
 func (h *Handler) Handle(ctx context.Context, message InboundMessage) error {
 	if h == nil || h.actions == nil || h.resolver == nil {
@@ -72,7 +80,19 @@ func (h *Handler) Handle(ctx context.Context, message InboundMessage) error {
 	if received.IsZero() {
 		received = time.Now()
 	}
-	_, err = h.actions.ProcessCommand(ctx, notification.Command{Identity: identity, IncomingID: message.MessageID, Verb: verb, ReceivedAt: received})
+	if h.telemetry {
+		ctx, eventSpan := otel.Tracer("election-bot").Start(ctx, "whatsapp.process_event")
+		defer eventSpan.End()
+		ctx, commandSpan := otel.Tracer("election-bot").Start(ctx, "whatsapp.process_command")
+		_, err = h.actions.ProcessCommand(ctx, notification.Command{Identity: identity, IncomingID: message.MessageID, Verb: verb, ReceivedAt: received})
+		if err != nil {
+			commandSpan.RecordError(errors.New("WhatsApp command processing failed"))
+			commandSpan.SetStatus(codes.Error, "command processing failed")
+		}
+		commandSpan.End()
+	} else {
+		_, err = h.actions.ProcessCommand(ctx, notification.Command{Identity: identity, IncomingID: message.MessageID, Verb: verb, ReceivedAt: received})
+	}
 	if err != nil {
 		h.logger.ErrorContext(ctx, "WhatsApp command processing failed", "operation", "whatsapp.process_command", "reason", "application_error")
 		return err

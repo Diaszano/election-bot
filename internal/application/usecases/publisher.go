@@ -28,18 +28,23 @@ func WithMaxAttempts(n int) PublisherOption {
 	}
 }
 
+func WithTelemetry(enabled bool) PublisherOption {
+	return func(p *Publisher) { p.telemetryEnabled = enabled }
+}
+
 type Publisher struct {
-	channel     subscription.Channel
-	store       ports.ChannelDeliveries
-	sender      ports.ChannelSender
-	clock       ports.Clock
-	policy      notification.Policy
-	maxAttempts int
-	gate        chan struct{}
+	channel          subscription.Channel
+	store            ports.ChannelDeliveries
+	sender           ports.ChannelSender
+	clock            ports.Clock
+	policy           notification.Policy
+	maxAttempts      int
+	telemetryEnabled bool
+	gate             chan struct{}
 }
 
 func NewPublisher(channel subscription.Channel, store ports.ChannelDeliveries, sender ports.ChannelSender, clock ports.Clock, policy notification.Policy, options ...PublisherOption) *Publisher {
-	p := &Publisher{channel: channel, store: store, sender: sender, clock: clock, policy: policy, maxAttempts: defaultPublisherAttempts, gate: make(chan struct{}, 1)}
+	p := &Publisher{channel: channel, store: store, sender: sender, clock: clock, policy: policy, maxAttempts: defaultPublisherAttempts, telemetryEnabled: true, gate: make(chan struct{}, 1)}
 	for _, option := range options {
 		option(p)
 	}
@@ -62,7 +67,10 @@ func (p *Publisher) Publish(ctx context.Context) (err error) {
 	if len(jobs) == 0 {
 		return nil
 	}
-	ctx, finish := services.Operation(ctx, "notifications.publish")
+	finish := func(error) {}
+	if p.channel != subscription.WhatsApp || p.telemetryEnabled {
+		ctx, finish = services.Operation(ctx, "notifications.publish")
+	}
 	defer func() { finish(err) }()
 	var channelState notification.ChannelState
 	stateStore, _ := p.store.(ports.ChannelStateStore)
@@ -187,6 +195,9 @@ func (p *Publisher) deliver(ctx context.Context, job notification.Delivery, oper
 				if e := p.store.DisableEditing(ctx, job, due, "missing_message"); e != nil {
 					return e
 				}
+				if p.telemetryEnabled {
+					services.Counter(ctx, "whatsapp_delivery_failures")
+				}
 				return nil
 			}
 			attempt, err = p.prepare(ctx, job, notification.Send)
@@ -196,7 +207,7 @@ func (p *Publisher) deliver(ctx context.Context, job notification.Delivery, oper
 			}
 		}
 		if err == nil {
-			return p.store.CompleteAttempt(ctx, job, attempt, acceptance)
+			return p.complete(ctx, job, attempt, acceptance)
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -206,7 +217,10 @@ func (p *Publisher) deliver(ctx context.Context, job notification.Delivery, oper
 			kind = api.Kind
 		}
 		if kind == "not_modified" && operation == notification.Edit {
-			return p.store.CompleteAttempt(ctx, job, attempt, notification.Acceptance{Ref: job.MainState.Ref, Operation: notification.Edit, AcceptedAt: p.clock.Now(), NextOutboundAt: p.clock.Now().Add(p.policy.RecipientMin)})
+			return p.complete(ctx, job, attempt, notification.Acceptance{Ref: job.MainState.Ref, Operation: notification.Edit, AcceptedAt: p.clock.Now(), NextOutboundAt: p.clock.Now().Add(p.policy.RecipientMin)})
+		}
+		if p.channel == subscription.WhatsApp && p.telemetryEnabled {
+			services.Counter(ctx, "whatsapp_delivery_failures")
 		}
 		if kind == "rate_limited" && api != nil && api.RetryAfter > 0 {
 			if stateStore, ok := p.store.(ports.ChannelStateStore); ok {
@@ -237,7 +251,19 @@ func (p *Publisher) deliver(ctx context.Context, job notification.Delivery, oper
 	if acceptance.AcceptedAt.IsZero() {
 		acceptance.AcceptedAt = p.clock.Now()
 	}
-	return p.store.CompleteAttempt(ctx, job, attempt, acceptance)
+	return p.complete(ctx, job, attempt, acceptance)
+}
+
+func (p *Publisher) complete(ctx context.Context, job notification.Delivery, attempt notification.Attempt, accepted notification.Acceptance) error {
+	err := p.store.CompleteAttempt(ctx, job, attempt, accepted)
+	if err == nil && p.channel == subscription.WhatsApp && p.telemetryEnabled {
+		name := "whatsapp_messages_sent"
+		if attempt.Operation == notification.Edit {
+			name = "whatsapp_messages_edited"
+		}
+		services.Counter(ctx, name)
+	}
+	return err
 }
 
 func (p *Publisher) prepare(ctx context.Context, job notification.Delivery, operation notification.Operation) (notification.Attempt, error) {
@@ -253,6 +279,12 @@ func (p *Publisher) send(ctx context.Context, job notification.Delivery, attempt
 	if p.channel == subscription.Telegram {
 		name = "telegram"
 	}
+	if !p.telemetryEnabled {
+		if attempt.Operation == notification.Edit {
+			return p.sender.Edit(ctx, job.Identity.Recipient, job.MainState.Ref, attempt)
+		}
+		return p.sender.Send(ctx, job.Identity.Recipient, attempt)
+	}
 	ctx, finish := services.Operation(ctx, name+map[notification.Operation]string{notification.Send: ".send_message", notification.Edit: ".edit_message"}[attempt.Operation])
 	var acceptance notification.Acceptance
 	var err error
@@ -261,10 +293,30 @@ func (p *Publisher) send(ctx context.Context, job notification.Delivery, attempt
 	} else {
 		acceptance, err = p.sender.Send(ctx, job.Identity.Recipient, attempt)
 	}
-	finish(err)
-	services.Duration(ctx, "notification_send_duration", started)
+	spanErr := err
+	if err != nil && p.channel == subscription.WhatsApp {
+		spanErr = safeWhatsAppSpanError(err)
+	}
+	finish(spanErr)
+	if p.channel == subscription.WhatsApp {
+		services.Duration(ctx, "whatsapp_message_send_duration", started)
+	} else {
+		services.Duration(ctx, "notification_send_duration", started)
+	}
 	return acceptance, err
 }
+
+func safeWhatsAppSpanError(err error) error {
+	var external *ports.ExternalError
+	if errors.As(err, &external) {
+		if external.Kind == "not_modified" {
+			return nil
+		}
+		return external
+	}
+	return &ports.ExternalError{Kind: "transient"}
+}
+
 func retryDelay(attempt int) time.Duration {
 	base := min(time.Duration(1<<min(attempt, 8))*time.Second, 5*time.Minute)
 	return base/2 + time.Duration(randv2.Int64N(int64(base/2)+1))
