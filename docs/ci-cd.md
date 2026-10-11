@@ -97,13 +97,14 @@ The repository strictly enforces **Conventional Commits 1.0.0**.
 
 ### 3.2 Automated Enforcement & Exemptions
 
-Commit validation is performed by the zero-dependency Go utility `cmd/dev-check commit`:
-- In CI: The `standards` job validates all commits introduced in the pull request (`git log origin/main..HEAD`).
-- In Git Hooks: Optional local commit-msg hook installed via `make git-hooks`.
+Commit validation is performed by the zero-dependency Go utility `cmd/dev-check`:
+- **Pull Request Range Validation**: In CI, the `standards` job executes `cmd/dev-check pr-commits --base <base-sha> --head <head-sha>` to validate **all newly introduced commits** in the pull request range, ensuring no non-compliant commits can be merged via squash or merge commits.
+- **Single Commit & Hook Validation**: Developers can validate individual commit messages via `cmd/dev-check commit --msg "..."` or install the automated git hook via `make git-hooks`.
 - **Exemptions**:
-  - Merge commits (e.g. `Merge branch ...`, `Merge pull request ...`, `Merge made by the 'ort' strategy`)
+  - Non-fast-forward merge commits (`Merge branch ...`, `Merge pull request ...`, `Merge made by the ...`)
   - Automated Release Please commits (`chore(main): release ...`)
-  - Automated Dependabot commits (`chore(deps): ...`)
+  - Automated Dependabot commits (`chore(deps): ...`, `chore(deps-dev): ...`)
+  - Historical ancestor commits (commits predating the PR branch point are not retroactively evaluated)
 
 ---
 
@@ -217,7 +218,10 @@ Job `publish-ghcr` publishes multi-architecture images to GitHub Container Regis
   - **Minor Series Alias**: `0.1` (tracks latest patch in minor series).
   - **Major Series Alias**: `1` (for releases `>= 1.0.0`).
   - **`latest` Tag Policy**: Strictly reserved for releases `>= 1.0.0`. Pre-1.0 releases (`0.y.z`) NEVER receive the `latest` tag.
-- **Trivy Vulnerability Gate**: The image is scanned before publishing; unexempted `CRITICAL` vulnerabilities block publication.
+- **Trivy Multi-Architecture Vulnerability Gate**:
+  - Both target architectures (`linux/amd64` and `linux/arm64`) are independently built locally as candidate images (`election-bot:candidate-amd64` and `election-bot:candidate-arm64`) and scanned with Trivy.
+  - Severity policy: `severity: CRITICAL` with `exit-code: 1`. Any unignored critical finding on either architecture immediately terminates the workflow and prevents publishing.
+  - Artifact identity: Both candidates are compiled from the exact verified commit SHA (`commit_sha`) using pinned base images (`golang:1.27.0-alpine3.21` and `gcr.io/distroless/static-debian12:nonroot`). The Buildx layer cache ensures that the published multi-arch manifest list references the identical compiled artifacts that underwent security scanning.
 - **Software Bill of Materials (SBOM)**: Generated in SPDX JSON format using `anchore/sbom-action` and pushed to GHCR alongside the image.
 - **Cryptographic Attestation**: Build provenance is generated and signed using `actions/attest-build-provenance` via GitHub's Sigstore integration.
 
@@ -260,29 +264,53 @@ The `.github/workflows/release.yml` workflow exposes a manual recovery entrypoin
 
 ## 8. GitHub Rulesets & Branch Protection
 
-To guarantee repository integrity, the following ruleset configuration is recommended for `refs/heads/main`:
+To guarantee repository integrity, security, and traceability, the repository uses GitHub Rulesets.
 
-### 8.1 Recommended Ruleset Configuration
+### 8.1 Main Branch Protection Ruleset (`main-protection`)
 
-- **Target**: `refs/heads/main`
+- **Ruleset Name**: `main-protection`
+- **Enforcement Status**: `Active`
+- **Target Branches**: `Include default branch` (`refs/heads/main`)
 - **Protection Rules**:
-  - **Require a pull request before merging**:
-    - Minimum required approvals: 1.
-    - Dismiss stale pull request approvals when new commits are pushed: Enabled.
-    - Require review from Code Owners: Enabled (`.github/CODEOWNERS`).
-  - **Require status checks to pass**:
+  - **Require a pull request before merging**: Enabled.
+    - **Review Policy**:
+      - **Solo Maintainer Mode (Default)**:
+        - Required approvals: `0` (prevents repository deadlock since the author `@Diaszano` cannot approve their own pull request).
+        - Require review from Code Owners: Disabled for merge gating, while preserving `.github/CODEOWNERS` for ownership and review visibility.
+        - Dismiss stale pull request approvals: Enabled.
+        - Require conversation resolution: Enabled.
+        - Strict CI enforcement: All 4 mandatory status checks must pass before merging. No routine bypass of CI checks.
+      - **Collaborative Mode (When multiple maintainers exist)**:
+        - Required approvals: `1` (or more).
+        - Require review from Code Owners: Enabled (`.github/CODEOWNERS`).
+        - Dismiss stale pull request approvals: Enabled.
+        - Require conversation resolution: Enabled.
+  - **Require status checks to pass before merging**: Enabled.
     - Require branches to be up to date before merging: Enabled.
-    - Required checks:
-      - `standards`
-      - `go-quality`
-      - `security`
-      - `docker-validation`
+    - Mandatory status checks (exact context names produced by `.github/workflows/ci.yml`):
+      - `standards` (Governance, branch naming, PR title, and PR commit range Conventional Commits)
+      - `go-quality` (Unit tests, race detector, go vet, golangci-lint, offline simulation)
+      - `security` (govulncheck, gitleaks, dependency review)
+      - `docker-validation` (Container build, non-root smoke test, and Trivy scan)
   - **Block force pushes**: Enabled (strict).
-  - **Block branch deletions**: Enabled (strict).
-  - **Require signed commits**: Recommended (GPG/SSH commit signature verification).
-  - **Merge Methods**: Allow Merge Commits (non-fast-forward merge commits).
-    - *Note*: Do NOT enable "Require linear history" while merge commits are standard practice for traceability.
-  - **Bypass Actors**: Restricted strictly to Repository Administrators for emergency disaster recovery only.
+  - **Restrict deletions**: Enabled (strict).
+  - **Require linear history**: **DISABLED (Strictly Disabled)**.
+    - *Rationale*: The project enforces a non-fast-forward merge policy (`git merge --no-ff`) for release and feature branch merges to maintain full historical traceability. Enabling "Require linear history" would break this established integration workflow.
+  - **Allowed Merge Methods**: Allow Merge Commits (`git merge --no-ff`).
+  - **Bypass Actors**: None (or strictly restricted to Repository Administrators for disaster recovery).
+
+### 8.2 Release Tag Immutability Ruleset (`release-tag-immutability`)
+
+To guarantee strict Semantic Versioning 2.0.0 immutability:
+
+- **Ruleset Name**: `release-tag-immutability`
+- **Enforcement Status**: `Active`
+- **Target Refs**: `Include: refs/tags/v*`
+- **Protection Rules**:
+  - **Restrict updates**: Enabled (prevents moving existing tags to different commits).
+  - **Restrict deletions**: Enabled (prevents deleting published version tags).
+  - **Restrict creations**: **DISABLED**.
+    - *Critical Distinction*: Leaving "Restrict creations" disabled allows authorized release workflows (e.g. `release-please` running with `GITHUB_TOKEN` and `contents: write`) to legitimately create new version tags (such as `v0.1.0`), while permanently forbidding anyone from modifying or deleting existing tags.
 
 ---
 
@@ -371,3 +399,90 @@ When a production defect requires an immediate code fix:
 | `make git-hooks` | Installs local `commit-msg` hook for automatic Conventional Commit validation |
 | `election-bot version` | CLI introspection displaying version, commit, Go version, and platform |
 | `election-bot version --json` | CLI introspection outputting structured JSON metadata |
+
+---
+
+## 11. Remote Activation Runbook (Step-by-Step)
+
+This runbook outlines the required sequence to safely activate GitHub Actions, Rulesets, Release Please, and GHCR upon receiving operator authorization to push to remote GitHub.
+
+### Phase A: Local Preparation
+1. Confirm the working tree on `main` is completely clean:
+   ```sh
+   git status
+   ```
+2. Verify that local verification checks pass:
+   ```sh
+   make check
+   make ci
+   make release-check
+   ```
+3. Confirm that the initial planned version in `.release-please-manifest.json` is `0.1.0` and no local Git tag exists:
+   ```sh
+   git tag -l "v*"
+   ```
+
+### Phase B: First Push (Requires Operator Authorization)
+1. Execute the initial push of `main` to GitHub:
+   ```sh
+   git push origin main
+   ```
+   *(Note: Do not execute without explicit user authorization).*
+2. Navigate to **Actions** in GitHub web UI and verify:
+   - `CI` workflow starts and completes successfully on `main` across all four jobs: `standards`, `go-quality`, `security`, and `docker-validation`.
+   - `Release & Publishing` workflow starts, validates CI completion on the commit SHA, and evaluates conventional commits.
+   - Initial Release Please run opens the first Release PR: `chore(main): release 0.1.0`.
+
+### Phase C: Repository & Ruleset Activation
+1. **Configure Actions Permissions**:
+   - Navigate to **Settings** -> **Actions** -> **General**.
+   - Under **Workflow permissions**, select **Read repository contents and packages permissions**.
+   - Check **Allow GitHub Actions to create and approve pull requests** (required for Release Please to create PRs using `GITHUB_TOKEN`).
+2. **Activate Main Branch Ruleset (`main-protection`)**:
+   - Navigate to **Settings** -> **Rules** -> **Rulesets** -> **New ruleset**.
+   - Configure as documented in Section 8.1 with **Solo Maintainer Mode**:
+     - Ruleset name: `main-protection`
+     - Enforcement: `Active`
+     - Target: `refs/heads/main`
+     - Require pull request: Enabled (Approvals: `0`)
+     - Require status checks: Enabled (`standards`, `go-quality`, `security`, `docker-validation`)
+     - Require branches up to date: Enabled
+     - Require linear history: **DISABLED**
+     - Allowed merge methods: Allow merge commits (`git merge --no-ff`)
+3. **Activate Release Tag Ruleset (`release-tag-immutability`)**:
+   - Create ruleset targeting `refs/tags/v*`:
+     - Ruleset name: `release-tag-immutability`
+     - Enforcement: `Active`
+     - Target refs: `Include: refs/tags/v*`
+     - Restrict updates: Enabled
+     - Restrict deletions: Enabled
+     - Restrict creations: **DISABLED** (allows `release-please` to legitimately create tags)
+
+### Phase D: Test Pull Requests (Controlled Verification)
+1. Create a feature branch: `git checkout -b test/ci-activation main`.
+2. Add a minor documentation fix, commit with conventional header: `docs(readme): verify ci activation`.
+3. Open a Pull Request to `main`.
+4. Verify that:
+   - `standards` validates branch name, PR title, and all PR commit messages.
+   - `go-quality`, `security`, and `docker-validation` execute and pass.
+   - No registry publication occurs.
+5. Merge the PR using `git merge --no-ff`.
+
+### Phase E: Release Please PR Verification
+1. Inspect the open Release PR: `chore(main): release 0.1.0`.
+2. As documented for PRs created by `GITHUB_TOKEN`, click **Approve and run workflows** in the GitHub UI to trigger CI verification on the Release PR.
+3. Verify that `standards`, `go-quality`, `security`, and `docker-validation` pass on the Release PR.
+4. Review the generated `CHANGELOG.md` entry for `v0.1.0`.
+
+### Phase F: First Official Release Publication (`v0.1.0`)
+1. Merge the Release PR into `main`.
+2. Observe `Release & Publishing` workflow:
+   - Job `verify-release-commit` polls and confirms that all 4 CI checks passed on the release commit SHA.
+   - Job `release-please` creates Git tag `v0.1.0` and publishes the GitHub Release.
+   - Job `publish-ghcr` builds and scans `linux/amd64` and `linux/arm64` candidate images with Trivy, pushes the multi-arch image to GHCR, generates the SPDX SBOM, and emits Sigstore provenance attestations.
+   - Job `publish-release-assets` compiles cross-platform static binaries and uploads `.tar.gz` packages with checksums to the release.
+3. Verify the published container image:
+   ```sh
+   docker pull ghcr.io/diaszano/election-bot:v0.1.0
+   docker run --rm ghcr.io/diaszano/election-bot:v0.1.0 version
+   ```

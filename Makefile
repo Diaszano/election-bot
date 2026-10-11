@@ -34,6 +34,7 @@ clean:
 check:
 	go run ./cmd/dev-check branch
 	go run ./cmd/dev-check release-config
+	go run ./cmd/dev-check pr-commits
 ci:
 	go mod verify
 	go vet ./...
