@@ -8,16 +8,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Diaszano/election-bot/internal/domain/election"
+	"github.com/Diaszano/election-bot/internal/domain/subscription"
 )
 
 type Config struct {
-	Environment, LogLevel, Mode, Token, Database, Address, ResultsURL, BaseURL, TSEEnvironment, OTLPEndpoint                  string
-	TelegramEnabled, OTELEnabled                                                                                              bool
-	PollInterval, BeforeInterval, FinalInterval, HTTPTimeout, NotificationInterval, StaleAfter, DelayedAfter, ShutdownTimeout time.Duration
-	PollTimeout                                                                                                               int
-	Location                                                                                                                  *time.Location
-	CountingStart                                                                                                             time.Time
-	Sampling                                                                                                                  float64
+	Environment, LogLevel, Mode, ExecutionMode, Token, Database, Address, ResultsURL, BaseURL, TSEEnvironment, OTLPEndpoint, WhatsAppSessionDB string
+	WhatsAppAllowedRecipients                                                                                                                  []subscription.Identity
+	TelegramEnabled, OTELEnabled, WhatsAppEnabled, WhatsAppReconnectEnabled, WhatsAppTelemetryEnabled                                          bool
+	WhatsAppDigestInterval, WhatsAppEditMinInterval, WhatsAppRecipientMinInterval, WhatsAppConnectTimeout                                      time.Duration
+	PollInterval, BeforeInterval, FinalInterval, HTTPTimeout, NotificationInterval, StaleAfter, DelayedAfter, ShutdownTimeout                  time.Duration
+	PollTimeout                                                                                                                                int
+	Location                                                                                                                                   *time.Location
+	CountingStart                                                                                                                              time.Time
+	Sampling                                                                                                                                   float64
 }
 
 func value(k, d string) string {
@@ -26,7 +31,13 @@ func value(k, d string) string {
 	}
 	return d
 }
-func Load() (c Config, err error) {
+func Load() (Config, error) { return LoadForMode("runtime") }
+
+func LoadForMode(mode string) (c Config, err error) {
+	if mode != "runtime" && mode != "pair" && mode != "logout" && mode != "simulation" {
+		return c, fmt.Errorf("invalid execution mode")
+	}
+	c.ExecutionMode = mode
 	for k, want := range map[string]string{"APP_NAME": "election-bot", "OTEL_SERVICE_NAME": "election-bot", "OTEL_SERVICE_NAMESPACE": "elections", "ELECTION_YEAR": "2026", "ELECTION_ROUND": "2", "ELECTION_CODE": "6258"} {
 		if value(k, want) != want {
 			return c, fmt.Errorf("%s must be %s", k, want)
@@ -42,12 +53,14 @@ func Load() (c Config, err error) {
 		return c, fmt.Errorf("official production contract unverified; DATA_SOURCE_MODE must be simulation")
 	}
 	c.Token = value("TELEGRAM_BOT_TOKEN", "")
-	c.TelegramEnabled, err = strconv.ParseBool(value("TELEGRAM_ENABLED", "false"))
-	if err != nil {
-		return c, fmt.Errorf("invalid TELEGRAM_ENABLED")
-	}
-	if c.TelegramEnabled && c.Token == "" {
-		return c, fmt.Errorf("TELEGRAM_BOT_TOKEN required when Telegram enabled")
+	if mode == "runtime" {
+		c.TelegramEnabled, err = strconv.ParseBool(value("TELEGRAM_ENABLED", "false"))
+		if err != nil {
+			return c, fmt.Errorf("invalid TELEGRAM_ENABLED")
+		}
+		if c.TelegramEnabled && c.Token == "" {
+			return c, fmt.Errorf("TELEGRAM_BOT_TOKEN required when Telegram enabled")
+		}
 	}
 	c.OTELEnabled, err = strconv.ParseBool(value("OTEL_ENABLED", "false"))
 	if err != nil {
@@ -105,5 +118,91 @@ func Load() (c Config, err error) {
 			return c, fmt.Errorf("invalid %s", d.k)
 		}
 	}
+	if err = loadWhatsApp(&c, mode); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+func strictBool(key, fallback string) (bool, error) {
+	v := strings.ToLower(value(key, fallback))
+	if v == "true" {
+		return true, nil
+	}
+	if v == "false" {
+		return false, nil
+	}
+	return false, fmt.Errorf("invalid %s", key)
+}
+func loadWhatsApp(c *Config, mode string) error {
+	c.WhatsAppSessionDB = value("WHATSAPP_SESSION_DB_PATH", "data/whatsapp-session.db")
+	c.WhatsAppDigestInterval = 15 * time.Minute
+	c.WhatsAppEditMinInterval = time.Minute
+	c.WhatsAppRecipientMinInterval = 3 * time.Second
+	c.WhatsAppConnectTimeout = 30 * time.Second
+	c.WhatsAppReconnectEnabled = true
+	c.WhatsAppTelemetryEnabled = true
+	if mode == "simulation" {
+		return nil
+	}
+	if mode == "pair" || mode == "logout" {
+		if c.WhatsAppSessionDB == "" {
+			return fmt.Errorf("WHATSAPP_SESSION_DB_PATH required")
+		}
+		var err error
+		c.WhatsAppConnectTimeout, err = time.ParseDuration(value("WHATSAPP_CONNECT_TIMEOUT", "30s"))
+		if err != nil || c.WhatsAppConnectTimeout <= 0 {
+			return fmt.Errorf("invalid WHATSAPP_CONNECT_TIMEOUT")
+		}
+		return nil
+	}
+	var err error
+	c.WhatsAppEnabled, err = strictBool("WHATSAPP_ENABLED", "false")
+	if err != nil {
+		return err
+	}
+	if !c.WhatsAppEnabled {
+		return nil
+	}
+	if c.WhatsAppSessionDB == "" {
+		return fmt.Errorf("WHATSAPP_SESSION_DB_PATH required")
+	}
+	allow := strings.Split(value("WHATSAPP_ALLOWED_RECIPIENTS", ""), ",")
+	identity := election.Identity{Year: 2026, Round: 2, Code: "6258", Scope: "br", Office: 1}
+	seen := map[string]bool{}
+	for _, recipient := range allow {
+		recipient = strings.TrimSpace(recipient)
+		if recipient == "" {
+			continue
+		}
+		id, e := subscription.NewIdentity(identity, subscription.WhatsApp, recipient)
+		if e != nil {
+			return fmt.Errorf("invalid WHATSAPP_ALLOWED_RECIPIENTS")
+		}
+		if !seen[id.Key()] {
+			seen[id.Key()] = true
+			c.WhatsAppAllowedRecipients = append(c.WhatsAppAllowedRecipients, id)
+		}
+	}
+	if len(c.WhatsAppAllowedRecipients) == 0 {
+		return fmt.Errorf("WHATSAPP_ALLOWED_RECIPIENTS required when WhatsApp enabled")
+	}
+	for _, duration := range []struct {
+		key, def string
+		out      *time.Duration
+	}{{"WHATSAPP_DIGEST_INTERVAL", "15m", &c.WhatsAppDigestInterval}, {"WHATSAPP_EDIT_MIN_INTERVAL", "60s", &c.WhatsAppEditMinInterval}, {"WHATSAPP_RECIPIENT_MIN_INTERVAL", "3s", &c.WhatsAppRecipientMinInterval}, {"WHATSAPP_CONNECT_TIMEOUT", "30s", &c.WhatsAppConnectTimeout}} {
+		*duration.out, err = time.ParseDuration(value(duration.key, duration.def))
+		if err != nil || *duration.out <= 0 {
+			return fmt.Errorf("invalid %s", duration.key)
+		}
+	}
+	c.WhatsAppReconnectEnabled, err = strictBool("WHATSAPP_RECONNECT_ENABLED", "true")
+	if err != nil {
+		return err
+	}
+	c.WhatsAppTelemetryEnabled, err = strictBool("WHATSAPP_TELEMETRY_ENABLED", "true")
+	if err != nil {
+		return err
+	}
+	return nil
 }

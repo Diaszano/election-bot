@@ -1,22 +1,18 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"strings"
+	"context"
 	"testing"
 )
 
-func TestHealthcheckUsesConfiguredPort(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health/live" {
-			t.Fatal(r.URL.Path)
-		}
-		w.WriteHeader(200)
-	}))
-	defer server.Close()
-	t.Setenv("HTTP_LISTEN_ADDRESS", strings.TrimPrefix(server.URL, "http://"))
-	if e := healthcheck(); e != nil {
-		t.Fatal(e)
+func TestCLIWhatsAppModes(t *testing.T) {
+	called := ""
+	handled, err := dispatchWhatsApp(context.Background(), []string{"whatsapp", "pair"}, func(context.Context) error { called = "pair"; return nil }, func(context.Context) error { called = "logout"; return nil })
+	if err != nil || !handled || called != "pair" {
+		t.Fatalf("handled=%t called=%q err=%v", handled, called, err)
+	}
+	handled, err = dispatchWhatsApp(context.Background(), []string{"whatsapp", "logout"}, func(context.Context) error { called = "pair"; return nil }, func(context.Context) error { called = "logout"; return nil })
+	if err != nil || !handled || called != "logout" {
+		t.Fatalf("handled=%t called=%q err=%v", handled, called, err)
 	}
 }

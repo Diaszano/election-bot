@@ -60,6 +60,16 @@ func (c *Client) handleEvent(raw any) {
 	select {
 	case c.events <- event:
 	default:
+		if event.Kind == ConnectionAuthenticationRequired || event.Kind == ConnectionRestricted || event.Kind == ConnectionOutdated {
+			select {
+			case <-c.events:
+			default:
+			}
+			select {
+			case c.events <- event:
+			default:
+			}
+		}
 	}
 }
 func (c *Client) Paired() bool {

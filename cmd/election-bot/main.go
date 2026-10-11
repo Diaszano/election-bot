@@ -8,7 +8,9 @@ import (
 	"github.com/Diaszano/election-bot/internal/platform/config"
 	"github.com/Diaszano/election-bot/internal/platform/lifecycle"
 	"github.com/Diaszano/election-bot/internal/platform/observability"
+	"github.com/mdp/qrterminal/v3"
 	"go.opentelemetry.io/otel"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +21,15 @@ import (
 )
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	if handled, err := dispatchWhatsApp(ctx, os.Args[1:], runWhatsAppPair, runWhatsAppLogout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	simulate := flag.Bool("simulate", false, "run deterministic offline recovery check")
 	health := flag.Bool("healthcheck", false, "probe local liveness")
 	flag.Parse()
@@ -28,8 +39,6 @@ func main() {
 		}
 		return
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 	var e error
 	if *simulate {
 		dir, x := os.MkdirTemp("", "election-bot-simulation-")
@@ -37,7 +46,7 @@ func main() {
 			e = x
 		} else {
 			defer os.RemoveAll(dir)
-			c, x := config.Load()
+			c, x := config.LoadForMode("simulation")
 			if x != nil {
 				e = x
 			} else {
@@ -72,6 +81,54 @@ func main() {
 		fmt.Fprintln(os.Stderr, e)
 		os.Exit(1)
 	}
+}
+
+func dispatchWhatsApp(ctx context.Context, args []string, pair, logout func(context.Context) error) (bool, error) {
+	if len(args) == 0 || args[0] != "whatsapp" {
+		return false, nil
+	}
+	if len(args) != 2 {
+		return true, errors.New("usage: election-bot whatsapp pair|logout")
+	}
+	switch args[1] {
+	case "pair":
+		return true, pair(ctx)
+	case "logout":
+		return true, logout(ctx)
+	default:
+		return true, errors.New("usage: election-bot whatsapp pair|logout")
+	}
+}
+
+func runWhatsAppPair(ctx context.Context) error {
+	c, err := config.LoadForMode("pair")
+	if err != nil {
+		return err
+	}
+	render := func(out io.Writer, code string) error {
+		qrterminal.GenerateHalfBlock(code, qrterminal.M, out)
+		return nil
+	}
+	if err = lifecycle.PairWhatsApp(ctx, c, os.Stdout, isTerminal(os.Stdout), render); err != nil {
+		return err
+	}
+	fmt.Println("WhatsApp pairing completed and session saved.")
+	return nil
+}
+func runWhatsAppLogout(ctx context.Context) error {
+	c, err := config.LoadForMode("logout")
+	if err != nil {
+		return err
+	}
+	if err = lifecycle.LogoutWhatsApp(ctx, c); err != nil {
+		return err
+	}
+	fmt.Println("WhatsApp session logged out.")
+	return nil
+}
+func isTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func healthcheck() error {
