@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -196,4 +197,111 @@ BREAKING CHANGE: SQLite configuration options removed.`,
 			}
 		})
 	}
+}
+
+func TestValidateCommitList(t *testing.T) {
+	t.Run("PR with three valid commits passes", func(t *testing.T) {
+		commits := []CommitInfo{
+			{SHA: "1111111111111111", Message: "feat(auth): add oauth login"},
+			{SHA: "2222222222222222", Message: "test(auth): add oauth test cases"},
+			{SHA: "3333333333333333", Message: "docs(auth): document oauth flow"},
+		}
+		errs := validateCommitList(commits)
+		if len(errs) != 0 {
+			t.Errorf("expected 0 errors, got %d: %v", len(errs), errs)
+		}
+	})
+
+	t.Run("PR with two valid commits and one invalid commit fails", func(t *testing.T) {
+		commits := []CommitInfo{
+			{SHA: "1111111111111111", Message: "feat(auth): add oauth login"},
+			{SHA: "2222222222222222", Message: "Fixed bug"}, // invalid
+			{SHA: "3333333333333333", Message: "docs(auth): document oauth flow"},
+		}
+		errs := validateCommitList(commits)
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+		}
+		if !strings.Contains(errs[0].Error(), "commit 2222222") {
+			t.Errorf("expected error to mention commit SHA, got: %v", errs[0])
+		}
+	})
+
+	t.Run("Conventional breaking changes pass", func(t *testing.T) {
+		commits := []CommitInfo{
+			{SHA: "aaaaaaa", Message: "feat!: drop legacy api"},
+			{SHA: "bbbbbbb", Message: "feat(api)!: remove v1 endpoints"},
+			{SHA: "ccccccc", Message: "fix: update error response\n\nBREAKING CHANGE: error format changed"},
+		}
+		errs := validateCommitList(commits)
+		if len(errs) != 0 {
+			t.Errorf("expected breaking changes to pass, got: %v", errs)
+		}
+	})
+
+	t.Run("Merge commits follow exemption policy", func(t *testing.T) {
+		commits := []CommitInfo{
+			{SHA: "mmmmmmm", Message: "Merge branch 'feat/oauth' into main"},
+			{SHA: "nnnnnnn", Message: "Merge pull request #42 from org/feat/oauth"},
+			{SHA: "ooooooo", Message: "Merge made by the 'ort' strategy."},
+		}
+		errs := validateCommitList(commits)
+		if len(errs) != 0 {
+			t.Errorf("expected merge commits to be exempt, got: %v", errs)
+		}
+	})
+
+	t.Run("Release Please-generated commits pass", func(t *testing.T) {
+		commits := []CommitInfo{
+			{SHA: "rrrrrrr", Message: "chore(main): release 0.1.0"},
+			{SHA: "sssssss", Message: "chore(main): release 1.0.0"},
+		}
+		errs := validateCommitList(commits)
+		if len(errs) != 0 {
+			t.Errorf("expected release-please commits to pass, got: %v", errs)
+		}
+	})
+
+	t.Run("Historical commits are not retroactively rejected", func(t *testing.T) {
+		prCommits := []CommitInfo{
+			{SHA: "newcommit1", Message: "feat(new): new feature"},
+			{SHA: "newcommit2", Message: "fix(new): new fix"},
+		}
+		errs := validateCommitList(prCommits)
+		if len(errs) != 0 {
+			t.Errorf("expected only PR commits to be evaluated, got: %v", errs)
+		}
+	})
+
+	t.Run("PR title validation remains consistent with commit validation", func(t *testing.T) {
+		validTitles := []string{
+			"feat: add new feature",
+			"fix(sub): fix bug",
+			"feat!: breaking change",
+			"chore(main): release 0.1.0",
+		}
+		for _, title := range validTitles {
+			if err := validatePRTitle(title); err != nil {
+				t.Errorf("valid PR title %q failed validatePRTitle: %v", title, err)
+			}
+			if err := validateCommit(title); err != nil {
+				t.Errorf("valid PR title %q failed validateCommit: %v", title, err)
+			}
+		}
+
+		invalidTitles := []string{
+			"random title",
+			"Feat: uppercase",
+			"feat: trailing dot.",
+			"hotfix: invalid type",
+		}
+		for _, title := range invalidTitles {
+			if err := validatePRTitle(title); err == nil {
+				t.Errorf("invalid PR title %q should fail validatePRTitle", title)
+			}
+			if err := validateCommit(title); err == nil {
+				t.Errorf("invalid PR title %q should fail validateCommit", title)
+			}
+		}
+	})
 }

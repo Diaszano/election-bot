@@ -242,6 +242,9 @@ func TestCIWorkflow(t *testing.T) {
 		if !strings.Contains(jobStr, `go run ./cmd/dev-check pr-title "${{ github.event.pull_request.title }}"`) {
 			t.Errorf("standards job must run 'go run ./cmd/dev-check pr-title \"${{ github.event.pull_request.title }}\"' on PRs")
 		}
+		if !strings.Contains(jobStr, `go run ./cmd/dev-check pr-commits --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"`) {
+			t.Errorf("standards job must run 'go run ./cmd/dev-check pr-commits' validating all commits in PR range")
+		}
 		if !strings.Contains(jobStr, "go run ./cmd/dev-check release-config") {
 			t.Errorf("standards job must run 'go run ./cmd/dev-check release-config'")
 		}

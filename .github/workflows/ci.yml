@@ -40,6 +40,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: go run ./cmd/dev-check pr-title "${{ github.event.pull_request.title }}"
 
+      - name: Validate PR commits convention
+        if: github.event_name == 'pull_request'
+        run: go run ./cmd/dev-check pr-commits --base "${{ github.event.pull_request.base.sha }}" --head "${{ github.event.pull_request.head.sha }}"
+
       - name: Validate release configuration
         run: go run ./cmd/dev-check release-config
 

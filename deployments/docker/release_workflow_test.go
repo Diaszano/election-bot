@@ -125,6 +125,9 @@ func TestReleaseWorkflow(t *testing.T) {
 		if !strings.Contains(jobStr, "aquasecurity/trivy-action") || !strings.Contains(jobStr, "CRITICAL") {
 			t.Errorf("publish-ghcr must scan with Trivy for CRITICAL vulnerabilities")
 		}
+		if !strings.Contains(jobStr, "candidate-amd64") || !strings.Contains(jobStr, "candidate-arm64") {
+			t.Errorf("publish-ghcr must build and scan candidate images for both linux/amd64 and linux/arm64")
+		}
 		trivyIdx := strings.Index(jobStr, "aquasecurity/trivy-action")
 		pushIdx := strings.Index(jobStr, "push: true")
 		if trivyIdx == -1 || pushIdx == -1 || trivyIdx >= pushIdx {

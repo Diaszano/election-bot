@@ -175,6 +175,124 @@ func validateCommit(msg string) error {
 	return nil
 }
 
+// CommitInfo holds git commit metadata for range validation.
+type CommitInfo struct {
+	SHA     string
+	Message string
+}
+
+// validateCommitList validates each commit message in the provided slice.
+func validateCommitList(commits []CommitInfo) []error {
+	var errs []error
+	for _, c := range commits {
+		if err := validateCommit(c.Message); err != nil {
+			shortSHA := c.SHA
+			if len(shortSHA) > 7 {
+				shortSHA = shortSHA[:7]
+			}
+			if shortSHA != "" {
+				errs = append(errs, fmt.Errorf("commit %s: %w", shortSHA, err))
+			} else {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errs
+}
+
+func getCommitsInRange(base, head string) ([]CommitInfo, error) {
+	commitRange := fmt.Sprintf("%s..%s", base, head)
+	cmd := exec.Command("git", "log", "--format=%H%x1f%B%x1e", commitRange)
+	out, err := cmd.Output()
+	if err != nil {
+		// Fallback: resolve merge-base if direct range fails (e.g. diverged branches)
+		mbCmd := exec.Command("git", "merge-base", base, head)
+		mbOut, mbErr := mbCmd.Output()
+		if mbErr == nil {
+			mb := strings.TrimSpace(string(mbOut))
+			if mb != "" {
+				cmd = exec.Command("git", "log", "--format=%H%x1f%B%x1e", fmt.Sprintf("%s..%s", mb, head))
+				out, err = cmd.Output()
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve git commits for range %q: %w", commitRange, err)
+		}
+	}
+
+	records := strings.Split(string(out), "\x1e")
+	var commits []CommitInfo
+	for _, rec := range records {
+		rec = strings.TrimSpace(rec)
+		if rec == "" {
+			continue
+		}
+		parts := strings.SplitN(rec, "\x1f", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		sha := strings.TrimSpace(parts[0])
+		msg := strings.TrimSpace(parts[1])
+		commits = append(commits, CommitInfo{
+			SHA:     sha,
+			Message: msg,
+		})
+	}
+	return commits, nil
+}
+
+func runPRCommitsCmd(args []string) error {
+	fs := flag.NewFlagSet("pr-commits", flag.ContinueOnError)
+	baseFlag := fs.String("base", "", "Base git commit or ref")
+	headFlag := fs.String("head", "HEAD", "Head git commit or ref")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	base := *baseFlag
+	head := *headFlag
+
+	if base == "" && fs.NArg() >= 1 {
+		base = fs.Arg(0)
+		if fs.NArg() >= 2 {
+			head = fs.Arg(1)
+		}
+	}
+
+	if base == "" {
+		if exec.Command("git", "rev-parse", "--verify", "origin/main").Run() == nil {
+			base = "origin/main"
+		} else if exec.Command("git", "rev-parse", "--verify", "main").Run() == nil {
+			base = "main"
+		} else {
+			return errors.New("pr-commits requires --base flag (or base positional argument)")
+		}
+	}
+
+	commits, err := getCommitsInRange(base, head)
+	if err != nil {
+		return err
+	}
+
+	if len(commits) == 0 {
+		fmt.Printf("✓ No commits found in range %s..%s to validate\n", base, head)
+		return nil
+	}
+
+	errs := validateCommitList(commits)
+	if len(errs) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d commit(s) failed Conventional Commits validation in range %s..%s:\n", len(errs), base, head)
+		for _, e := range errs {
+			fmt.Fprintf(&b, "  - %v\n", e)
+		}
+		return errors.New(b.String())
+	}
+
+	fmt.Printf("✓ All %d commit(s) in range %s..%s are valid Conventional Commits\n", len(commits), base, head)
+	return nil
+}
+
 func getCurrentGitBranch() (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	out, err := cmd.Output()
@@ -390,7 +508,7 @@ func runReleaseConfigCmd(args []string) error {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: dev-check <branch|commit|pr-title|release-config> [options]\n")
+		fmt.Fprintf(os.Stderr, "Usage: dev-check <branch|commit|pr-commits|pr-title|release-config> [options]\n")
 		os.Exit(1)
 	}
 
@@ -403,12 +521,14 @@ func main() {
 		err = runBranchCmd(subArgs)
 	case "commit":
 		err = runCommitCmd(subArgs)
+	case "pr-commits":
+		err = runPRCommitsCmd(subArgs)
 	case "pr-title":
 		err = runPRTitleCmd(subArgs)
 	case "release-config":
 		err = runReleaseConfigCmd(subArgs)
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown subcommand %q. Available: branch, commit, pr-title, release-config\n", subcommand)
+		fmt.Fprintf(os.Stderr, "Unknown subcommand %q. Available: branch, commit, pr-commits, pr-title, release-config\n", subcommand)
 		os.Exit(1)
 	}
 

@@ -233,21 +233,43 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.pubmeta.outputs.commit_sha }}
 
-      - name: Build local container image for Trivy scan
+      - name: Build local linux/amd64 candidate for Trivy scan
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
         with:
           context: .
+          platforms: linux/amd64
           load: true
-          tags: election-bot:scan
+          tags: election-bot:candidate-amd64
           push: false
           build-args: |
             VERSION=${{ steps.pubmeta.outputs.tag_name }}
             COMMIT=${{ steps.pubmeta.outputs.commit_sha }}
 
-      - name: Scan container image with Trivy
+      - name: Build local linux/arm64 candidate for Trivy scan
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: election-bot:candidate-arm64
+          push: false
+          build-args: |
+            VERSION=${{ steps.pubmeta.outputs.tag_name }}
+            COMMIT=${{ steps.pubmeta.outputs.commit_sha }}
+
+      - name: Scan linux/amd64 image with Trivy
         uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
         with:
-          image-ref: election-bot:scan
+          image-ref: election-bot:candidate-amd64
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL
+
+      - name: Scan linux/arm64 image with Trivy
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          image-ref: election-bot:candidate-arm64
           format: table
           exit-code: '1'
           ignore-unfixed: true
