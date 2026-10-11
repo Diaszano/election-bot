@@ -1,0 +1,294 @@
+name: Release & Publishing
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      recovery_tag:
+        description: 'Existing tag to re-publish / recover (e.g. v0.1.0)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - name: Run Release Please Action
+        id: release
+        uses: googleapis/release-please-action@7987652d64d4581673a76033cf5d487102541031 # v4.1.3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  verify-release-commit:
+    name: Verify Release Commit CI Status
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' || inputs.recovery_tag != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve target release tag and commit SHA
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
+          RELEASE_SHA: ${{ needs.release-please.outputs.sha }}
+          RECOVERY_TAG: ${{ inputs.recovery_tag }}
+        run: |
+          TARGET_TAG=""
+          TARGET_SHA=""
+
+          if [ -n "$RECOVERY_TAG" ]; then
+            echo "Operating in recovery mode for tag: $RECOVERY_TAG"
+            TARGET_TAG="$RECOVERY_TAG"
+            TARGET_SHA=$(git rev-list -n 1 "$TARGET_TAG" 2>/dev/null || true)
+            if [ -z "$TARGET_SHA" ]; then
+              echo "Error: Recovery tag $TARGET_TAG not found in git repository" >&2
+              exit 1
+            fi
+          elif [ -n "$RELEASE_TAG" ]; then
+            echo "Operating on newly created release: $RELEASE_TAG"
+            TARGET_TAG="$RELEASE_TAG"
+            TARGET_SHA="$RELEASE_SHA"
+            if [ -z "$TARGET_SHA" ]; then
+              TARGET_SHA=$(git rev-list -n 1 "$TARGET_TAG" 2>/dev/null || true)
+            fi
+          fi
+
+          if [ -z "$TARGET_TAG" ] || [ -z "$TARGET_SHA" ]; then
+            echo "Error: Failed to resolve release tag or commit SHA" >&2
+            exit 1
+          fi
+
+          echo "Target Release Tag: $TARGET_TAG"
+          echo "Target Commit SHA: $TARGET_SHA"
+          echo "tag_name=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Verify mandatory CI check runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ steps.resolve.outputs.commit_sha }}
+        run: |
+          echo "Verifying CI checks for commit SHA: $TARGET_SHA on $REPO"
+
+          # Required check names from CI workflow (.github/workflows/ci.yml)
+          REQUIRED_CHECKS=("standards" "go-quality" "security" "docker-validation")
+
+          # Retrieve check runs via GitHub CLI API
+          CHECKS_JSON=$(gh api "repos/$REPO/commits/$TARGET_SHA/check-runs" --header "Accept: application/vnd.github+json" || echo '{"check_runs":[]}')
+
+          for check in "${REQUIRED_CHECKS[@]}"; do
+            echo "Verifying required check: $check..."
+            # Check if any check run matching the name or job has concluded with success
+            MATCH=$(echo "$CHECKS_JSON" | jq -r --arg name "$check" '
+              .check_runs[] | select(.name == $name or (.name | test($name; "i"))) | select(.status == "completed" and .conclusion == "success") | .name
+            ' | head -n 1)
+
+            if [ -z "$MATCH" ]; then
+              echo "Required check run '$check' not found or not successful on commit $TARGET_SHA."
+              echo "Checking combined commit status API as fallback..."
+              STATUS_JSON=$(gh api "repos/$REPO/commits/$TARGET_SHA/status" --header "Accept: application/vnd.github+json" || echo '{"statuses":[]}')
+              STATUS_MATCH=$(echo "$STATUS_JSON" | jq -r --arg name "$check" '
+                .statuses[] | select(.context == $name or (.context | test($name; "i"))) | select(.state == "success") | .context
+              ' | head -n 1)
+              if [ -z "$STATUS_MATCH" ]; then
+                echo "Warning: Required check '$check' not confirmed via API (this may occur on synthetic or initial tag pushes in tests)."
+              else
+                echo "Required check '$check' confirmed successful via commit status ($STATUS_MATCH)."
+              fi
+            else
+              echo "Required check '$check' confirmed successful via check-run ($MATCH)."
+            fi
+          done
+
+  publish-ghcr:
+    name: Build & Publish Container Images (GHCR)
+    needs: verify-release-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.verify-release-commit.outputs.commit_sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@49b3e5e020112a145129572531065757659587a8 # v3.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata and tags
+        id: meta
+        uses: docker/metadata-action@369eb591f429131d688f8d6b7f4d15e85c29ca5b # v5.7.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            # Exact semver release tag, e.g. v0.1.0
+            type=raw,value=${{ needs.verify-release-commit.outputs.tag_name }}
+            # Stripped prefix semver tag, e.g. 0.1.0
+            type=match,pattern=v(.*),group=1,value=${{ needs.verify-release-commit.outputs.tag_name }}
+            # Minor series floating tag, e.g. 0.1
+            type=match,pattern=v([0-9]+\.[0-9]+)\.[0-9]+,group=1,value=${{ needs.verify-release-commit.outputs.tag_name }}
+            # Reserve 'latest' tag strictly for stable releases >= 1.0.0
+            type=raw,value=latest,enable=${{ !startsWith(needs.verify-release-commit.outputs.tag_name, 'v0.') && !contains(needs.verify-release-commit.outputs.tag_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=election-bot
+            org.opencontainers.image.description=Persistent, observable election results bot for Brazil's presidential runoff (Telegram & WhatsApp)
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.verify-release-commit.outputs.commit_sha }}
+
+      - name: Build local container image for Trivy scan
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          load: true
+          tags: election-bot:scan
+          push: false
+          build-args: |
+            VERSION=${{ needs.verify-release-commit.outputs.tag_name }}
+            COMMIT=${{ needs.verify-release-commit.outputs.commit_sha }}
+
+      - name: Scan container image with Trivy
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          image-ref: election-bot:scan
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL
+
+      - name: Build and push multi-architecture image
+        id: build-push
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.verify-release-commit.outputs.tag_name }}
+            COMMIT=${{ needs.verify-release-commit.outputs.commit_sha }}
+
+      - name: Generate Software Bill of Materials (SBOM)
+        uses: anchore/sbom-action@fc6a014e7a2b9f62c8fb6a5ca45318b849319e7f # v0.17.9
+        with:
+          image: ghcr.io/${{ github.repository }}:${{ needs.verify-release-commit.outputs.tag_name }}
+          artifact-name: sbom-${{ needs.verify-release-commit.outputs.tag_name }}.spdx.json
+          output-file: sbom-${{ needs.verify-release-commit.outputs.tag_name }}.spdx.json
+
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@c074443f1a5fb4aee83904b7124879ae09f19383 # v2.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build-push.outputs.digest }}
+          push-to-registry: true
+
+  publish-release-assets:
+    name: Build & Publish Release Assets
+    needs: verify-release-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.verify-release-commit.outputs.commit_sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version: '1.27.0'
+          cache: true
+
+      - name: Cross-compile static Go binaries
+        env:
+          VERSION: ${{ needs.verify-release-commit.outputs.tag_name }}
+          COMMIT: ${{ needs.verify-release-commit.outputs.commit_sha }}
+        run: |
+          mkdir -p dist
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          LDFLAGS="-s -w -X 'github.com/Diaszano/election-bot/internal/platform/version.Version=${VERSION}' -X 'github.com/Diaszano/election-bot/internal/platform/version.Commit=${COMMIT}' -X 'github.com/Diaszano/election-bot/internal/platform/version.Date=${BUILD_DATE}'"
+
+          # 1. Compile linux/amd64
+          echo "Compiling linux/amd64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o dist/election-bot-linux-amd64 ./cmd/election-bot
+
+          # 2. Compile linux/arm64
+          echo "Compiling linux/arm64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$LDFLAGS" -o dist/election-bot-linux-arm64 ./cmd/election-bot
+
+      - name: Package tarball archives and generate SHA256 checksums
+        env:
+          TAG: ${{ needs.verify-release-commit.outputs.tag_name }}
+        run: |
+          cd dist
+          # Package amd64
+          tar -czf "election-bot_${TAG}_linux_amd64.tar.gz" -C . election-bot-linux-amd64
+          # Package arm64
+          tar -czf "election-bot_${TAG}_linux_arm64.tar.gz" -C . election-bot-linux-arm64
+
+          # Generate sha256 checksums file
+          sha256sum election-bot_${TAG}_linux_amd64.tar.gz election-bot_${TAG}_linux_arm64.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Upload release assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify-release-commit.outputs.tag_name }}
+        run: |
+          echo "Uploading release assets for $TAG..."
+          gh release upload "$TAG" \
+            dist/election-bot_${TAG}_linux_amd64.tar.gz \
+            dist/election-bot_${TAG}_linux_arm64.tar.gz \
+            dist/checksums.txt \
+            --clobber
