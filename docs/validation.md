@@ -95,6 +95,7 @@ Date: 2026-10-10 / 2026-10-11. Implementation branches: `feat/election-bot` (Tel
 | **Security & Scanning (`security`)** | `6738da8` | Run ID `38167991759`. Failed during action download: `gitleaks-action` and `govulncheck-action` pinned to unresolvable commit hashes. Updated to verified tag commit hashes (`v3.0.0` and `v1.0.4`). | FAIL (Diagnosed & Fixed) |
 | **Docker Validation (`docker-validation`)** | `6738da8` | Run ID `38167991759`. Failed during action download: `aquasecurity/trivy-action` composite step tried to resolve non-existent setup-trivy `v0.2.2`. Updated trivy-action to `v0.36.0` (`ed142fd0673e97e23eac54620cfb913e5ce36c25`). | FAIL (Diagnosed & Fixed) |
 | **Release & Publishing (`release.yml`)** | `6738da8` | Run ID `38167991688`. Failed-safe in `verify-release-commit`: correctly detected that mandatory CI checks failed and refused to create tags or publish artifacts. | PASS (Fail-Closed Safety Working) |
+| **Pull Request #8 Full Remote Verification** | `e9f088f` | Run ID `38181868983` on PR #8 (`ci/remote-actions-validation`). All 4 mandatory gates passed completely on GitHub Actions runners: `Standards & Governance` (PASS, 23s), `Security & Vulnerability Scanning` (PASS, 56s), `Docker Build & Validation` (PASS, 1m21s), and `Go Quality & Tests` (PASS, 4m28s). | PASS (4/4 Mandatory Gates Green) |
 
 ## Integration boundary and limitations
 
