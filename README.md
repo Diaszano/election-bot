@@ -74,6 +74,9 @@ See the complete [.env.example](.env.example). Duration values use Go syntax (`1
 | `ELECTION_YEAR`, `ELECTION_ROUND`, `ELECTION_CODE` | 2026, 2, 6258; other identities rejected |
 | `DATA_SOURCE_MODE` | simulation; official mode fails closed with a contract-verification error |
 | `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_POLL_TIMEOUT` | false, empty, 30 seconds; enabled transport requires token |
+| `WHATSAPP_ENABLED`, `WHATSAPP_SESSION_DB_PATH`, `WHATSAPP_ALLOWED_RECIPIENTS` | false, `/data/whatsapp-session.db`, empty; enabled transport requires a paired account and explicit private-recipient allowlist |
+| `WHATSAPP_DIGEST_INTERVAL`, `WHATSAPP_EDIT_MIN_INTERVAL`, `WHATSAPP_RECIPIENT_MIN_INTERVAL` | 15m, 60s, 3s; the maximum message edit age is fixed at 14m |
+| `WHATSAPP_CONNECT_TIMEOUT`, `WHATSAPP_RECONNECT_ENABLED`, `WHATSAPP_TELEMETRY_ENABLED` | 30s, true, true; WhatsApp metrics/spans can be disabled independently |
 | `TSE_BASE_URL`, `TSE_ENVIRONMENT`, `TSE_RESULTS_URL` | official host/environment, explicit results override; never silently enable an unverified endpoint |
 | `TSE_POLL_INTERVAL`, `TSE_PRE_COUNTING_INTERVAL`, `TSE_FINAL_INTERVAL` | 10s, 5m, 1h |
 | `TSE_HTTP_TIMEOUT`, `ELECTION_COUNTING_START` | 5s, 2026-10-25T17:00:00-03:00 operational window |
@@ -99,6 +102,24 @@ docker compose -f compose.yaml -f compose.observability.yaml up -d --build
 ```
 
 The application runs as UID 65532 in a distroless runtime; CA certificates and timezone data are available. The named `election-data` volume retains SQLite/WAL/SHM together. One replica only. Application startup does not depend on telemetry availability. Operator ports bind to localhost.
+
+### WhatsApp pairing and session operations
+
+WhatsApp is disabled by default. To enable it, set `WHATSAPP_ENABLED=true` and add only explicitly authorized private recipients to `WHATSAPP_ALLOWED_RECIPIENTS` as canonical `5511999999999@s.whatsapp.net` JIDs separated by commas. Every recipient must send `!start`; group and newsletter conversations are ignored. Set `WHATSAPP_SESSION_DB_PATH=/data/whatsapp-session.db` (the default); it is separate from `/data/elections.db` and lives in the same protected persistent volume.
+
+Pair interactively with the application stopped so the normal runtime and CLI cannot hold the session lock at the same time:
+
+```sh
+docker compose stop election-bot
+docker compose run --rm -it election-bot whatsapp pair
+docker compose up -d election-bot
+```
+
+To explicitly log out, use the same exclusive workflow with `docker compose run --rm -it election-bot whatsapp logout`. Pair again only after logout or revocation. The QR is printed only to the local interactive terminal; never paste it into logs or support tickets.
+
+The linked-device database contains authentication credentials. Stop the application before backing up or restoring it. Back up the database and any SQLite WAL/SHM files together using an encrypted, access-restricted backup process, keep files owner-only (mode 0600), and exclude the backup from Git and container build contexts. Restore the complete database set while the application is stopped; do not copy a live SQLite file. The Docker volume is owned by UID 65532 for the non-root application. Do not run the pairing command while the service is active.
+
+whatsmeow is an unofficial WhatsApp Web client and use may lead to account restrictions or bans, including with low-volume automation. The integration does not evade enforcement; use opt-in, allowlisting and conservative pacing. Consider the official WhatsApp Business Platform where officially supported business messaging is required.
 
 Grafana: http://127.0.0.1:3000, user `admin`, your configured password. Automatically provisioned dashboards: **Election Bot — Overview** and **Election Bot — Telemetry**. Prometheus: localhost:9090; Tempo: localhost:3200; Loki: localhost:3100.
 
