@@ -3,6 +3,7 @@ package usecases
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,8 @@ func testService(t *testing.T) (*Service, *sqlite.Store, *clock) {
 	}
 	t.Cleanup(func() { db.Close() })
 	c := &clock{time.Now()}
-	return New(db, db, simulation.New(), &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour}), db, c
+	wa, _ := subscription.NewIdentity(testElection, subscription.WhatsApp, "5511999999999@s.whatsapp.net")
+	return New(db, db, simulation.New(), &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour, AllowedWhatsAppRecipients: []subscription.Identity{wa}}), db, c
 }
 
 func identities(t *testing.T) (subscription.Identity, subscription.Identity) {
@@ -250,5 +252,36 @@ func TestAllowlistRemovalRequiresNewOptIn(t *testing.T) {
 	}
 	if !got.Active || got.Generation != 3 {
 		t.Fatalf("recipient should require a new opt-in generation: %+v", got)
+	}
+}
+
+func TestWhatsAppStatusIncludesSourceFreshnessPublicationAndConnection(t *testing.T) {
+	svc, db, clock := testService(t)
+	_, identity := identities(t)
+	snapshot := simulation.Snapshot(25)
+	if err := svc.ProcessElectionSnapshot(context.Background(), ports.FetchResult{Snapshot: &snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveChannelState(context.Background(), subscription.WhatsApp, notification.ChannelState{PauseReason: "connected"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.ProcessCommand(context.Background(), notification.Command{Identity: identity, IncomingID: "status-id", Verb: "status", ReceivedAt: clock.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := db.PendingChannel(context.Background(), subscription.WhatsApp, clock.Now().Add(time.Minute), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply string
+	for _, job := range jobs {
+		if job.Kind == "reply" {
+			reply = job.Text
+		}
+	}
+	for _, want := range []string{"Fonte: simulação local", "sincronização atualizada", "publicação dentro do prazo", "conexão WhatsApp: conectada"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("status omitted %q: %s", want, reply)
+		}
 	}
 }

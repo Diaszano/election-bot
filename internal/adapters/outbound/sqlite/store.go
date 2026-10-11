@@ -113,6 +113,18 @@ func (s *Store) Latest(ctx context.Context) (r ports.StoredSnapshot, e error) {
 	e = s.Transaction(ctx, func(t ports.Transaction) error { var x error; r, x = t.Latest(); return x })
 	return
 }
+func (t *transaction) ChannelState(channel subscription.Channel) (notification.ChannelState, error) {
+	var state notification.ChannelState
+	var global, paused int64
+	err := t.tx.QueryRowContext(t.ctx, `SELECT global_next_send_at,paused_until,authentication_required,account_binding,pause_reason FROM channel_state WHERE channel=?`, channel).Scan(&global, &paused, &state.AuthenticationRequired, &state.AccountBinding, &state.PauseReason)
+	state.GlobalNextSendAt = unixTime(global)
+	state.PausedUntil = unixTime(paused)
+	if errors.Is(err, sql.ErrNoRows) {
+		return state, nil
+	}
+	return state, err
+}
+
 func (t *transaction) Status() (ports.MonitoringStatus, error) {
 	var r ports.MonitoringStatus
 	var b string
@@ -249,12 +261,16 @@ func (t *transaction) Enqueue(d notification.Delivery) error {
 		}
 	}
 	var subscriberID, generation int64
-	e := t.tx.QueryRowContext(t.ctx, `SELECT id,generation FROM subscriptions WHERE election_key=? AND channel=? AND recipient=? AND active=1`, electionKey(identity.Election), identity.Channel, identity.Recipient).Scan(&subscriberID, &generation)
+	var active bool
+	e := t.tx.QueryRowContext(t.ctx, `SELECT id,generation,active FROM subscriptions WHERE election_key=? AND channel=? AND recipient=?`, electionKey(identity.Election), identity.Channel, identity.Recipient).Scan(&subscriberID, &generation, &active)
 	if errors.Is(e, sql.ErrNoRows) {
 		return ports.ErrNotFound
 	}
 	if e != nil {
 		return e
+	}
+	if !active && d.Kind != "reply" {
+		return ports.ErrNotFound
 	}
 	if d.Generation == 0 {
 		d.Generation = generation

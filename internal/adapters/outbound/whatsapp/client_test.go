@@ -11,6 +11,8 @@ import (
 	wa "go.mau.fi/whatsmeow"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 type fakeWAAPI struct {
@@ -75,5 +77,16 @@ func TestSendTimeoutAndCancellation(t *testing.T) {
 	_, err = client.Send(ctx, "5511999999999@s.whatsapp.net", notification.Attempt{RequestID: "id", Text: "x"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancellation, got %v", err)
+	}
+}
+
+func TestInboundEventTranslationKeepsOnlyCommandMetadata(t *testing.T) {
+	jid := types.NewJID("5511999999999", types.DefaultUserServer)
+	event := &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: jid, Sender: jid, IsFromMe: false}, ID: types.MessageID("stable-incoming"), Timestamp: time.Now()}, RawMessage: &waE2E.Message{Conversation: proto.String("!start")}}
+	client := &Client{messages: make(chan InboundMessage, 1), closed: make(chan struct{})}
+	client.handleEvent(event)
+	got := <-client.Messages()
+	if got.MessageID != "stable-incoming" || got.Text != "!start" || got.ChatJID != jid.String() || got.SenderJID != jid.String() || got.IsFromMe || got.IsGroup {
+		t.Fatalf("inbound=%+v", got)
 	}
 }

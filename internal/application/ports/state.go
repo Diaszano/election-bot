@@ -38,6 +38,7 @@ type Transaction interface {
 	RecordCommand(notification.Command) (bool, error)
 	AuditSubscription(subscription.Subscription, string, string, time.Time) error
 	Status() (MonitoringStatus, error)
+	ChannelState(subscription.Channel) (notification.ChannelState, error)
 	SetStatus(MonitoringStatus) error
 }
 type State interface {

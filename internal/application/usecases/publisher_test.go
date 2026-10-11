@@ -108,11 +108,15 @@ func publisherFixture(t *testing.T, c *clock, channel subscription.Channel, fake
 	if channel == subscription.WhatsApp {
 		identity.Recipient = "5511999999999@s.whatsapp.net"
 	}
-	if e = New(db, db, simulation.New(), &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour}).Subscribe(context.Background(), identity); e != nil {
+	allowed := []subscription.Identity{}
+	if channel == subscription.WhatsApp {
+		allowed = append(allowed, identity)
+	}
+	if e = New(db, db, simulation.New(), &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour, AllowedWhatsAppRecipients: allowed}).Subscribe(context.Background(), identity); e != nil {
 		t.Fatal(e)
 	}
 	snap := simulation.Snapshot(25)
-	if e = New(db, db, simulation.New(), &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour}).ProcessElectionSnapshot(context.Background(), ports.FetchResult{Snapshot: &snap}); e != nil {
+	if e = New(db, db, simulation.New(), &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour, AllowedWhatsAppRecipients: allowed}).ProcessElectionSnapshot(context.Background(), ports.FetchResult{Snapshot: &snap}); e != nil {
 		t.Fatal(e)
 	}
 	store := &attemptStore{ChannelDeliveries: db}
@@ -170,7 +174,7 @@ func TestBlockedWhatsAppDoesNotBlockTelegramOrPoll(t *testing.T) {
 	defer db.Close()
 	tgID, waID := identities(t)
 	waID.Election = testElection
-	svc := New(db, db, fixedProvider{}, &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour})
+	svc := New(db, db, fixedProvider{}, &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour, AllowedWhatsAppRecipients: []subscription.Identity{waID}})
 	if err = svc.Subscribe(ctx, tgID); err != nil {
 		t.Fatal(err)
 	}

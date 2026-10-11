@@ -170,13 +170,17 @@ func (m *ConnectionManager) Run(ctx context.Context) error {
 						m.setState(StateConnected)
 						state.AuthenticationRequired = false
 						state.PausedUntil = time.Time{}
-						state.PauseReason = ""
+						state.PauseReason = "connected"
 						if err = m.stateStore.SaveChannelState(ctx, subscription.WhatsApp, state); err != nil {
 							return err
 						}
 						continue
 					case ConnectionDisconnected:
 						m.setState(StateReconnecting)
+						state.PauseReason = "disconnected"
+						if err = m.stateStore.SaveChannelState(ctx, subscription.WhatsApp, state); err != nil {
+							return err
+						}
 						break
 					case ConnectionAuthenticationRequired:
 						return m.requireAuthentication(ctx)

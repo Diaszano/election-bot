@@ -56,7 +56,7 @@ func (s *Store) PendingChannel(ctx context.Context, channel subscription.Channel
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT o.id,o.subscription_id,s.channel,s.recipient,o.generation,o.kind,o.event_key,o.milestone,o.revision,o.semantic_revision,o.text,o.due,o.attempts,s.message_id,s.original_sent_at,s.last_edit_at,s.last_summary_at,s.last_activity_at,s.accepted_semantic_revision,s.accepted_presentation_revision,s.edit_unavailable,s.next_outbound_at
-	FROM outbox o JOIN subscriptions s ON s.id=o.subscription_id WHERE s.channel=? AND s.election_key=? AND o.state='pending' AND s.active=1 AND s.generation=o.generation AND max(o.due,s.next_outbound_at)<=? ORDER BY max(o.due,s.next_outbound_at),o.id LIMIT ?`, channel, electionIdentityKey(s.election), now.UnixNano(), limit)
+	FROM outbox o JOIN subscriptions s ON s.id=o.subscription_id WHERE s.channel=? AND s.election_key=? AND o.state='pending' AND (s.active=1 OR o.kind='reply') AND s.generation=o.generation AND max(o.due,s.next_outbound_at)<=? ORDER BY max(o.due,s.next_outbound_at),o.id LIMIT ?`, channel, electionIdentityKey(s.election), now.UnixNano(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -108,15 +108,12 @@ func (s *Store) PrepareAttempt(ctx context.Context, d notification.Delivery, ope
 		if err = t.tx.QueryRowContext(ctx, `SELECT s.id,s.active,s.generation,s.message_id FROM subscriptions s WHERE s.election_key=? AND s.channel=? AND s.recipient=?`, electionKey(identity.Election), identity.Channel, identity.Recipient).Scan(&result.ID, &active, &generation, &messageID); err != nil {
 			return err
 		}
-		if !active || generation != d.Generation {
-			return ports.ErrNotFound
-		}
-		var revision, text, state string
+		var revision, text, state, kind string
 		var outGeneration int64
-		if err = t.tx.QueryRowContext(ctx, `SELECT revision,text,state,generation FROM outbox WHERE id=? AND subscription_id=?`, d.ID, result.ID).Scan(&revision, &text, &state, &outGeneration); err != nil {
+		if err = t.tx.QueryRowContext(ctx, `SELECT revision,text,state,generation,kind FROM outbox WHERE id=? AND subscription_id=?`, d.ID, result.ID).Scan(&revision, &text, &state, &outGeneration, &kind); err != nil {
 			return err
 		}
-		if outGeneration != d.Generation || state != "pending" {
+		if generation != d.Generation || outGeneration != d.Generation || state != "pending" || (!active && kind != "reply") {
 			return ports.ErrNotFound
 		}
 		if d.Revision != "" && d.Revision != revision {
@@ -168,7 +165,7 @@ func (s *Store) CompleteAttempt(ctx context.Context, d notification.Delivery, a 
 		if err = t.tx.QueryRowContext(ctx, `SELECT id,active,generation FROM subscriptions WHERE election_key=? AND channel=? AND recipient=?`, electionKey(identity.Election), identity.Channel, identity.Recipient).Scan(&sid, &active, &generation); err != nil {
 			return err
 		}
-		if !active || generation != a.Generation {
+		if generation != a.Generation || (!active && d.Kind != "reply") {
 			return nil
 		}
 		acceptedAt := accepted.AcceptedAt
@@ -212,7 +209,7 @@ func (s *Store) CompleteAttempt(ctx context.Context, d notification.Delivery, a 
 }
 
 func (s *Store) RescheduleChannel(ctx context.Context, d notification.Delivery, due time.Time, kind string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE outbox SET due=?,attempts=attempts+1,last_error=? WHERE id=? AND generation=? AND revision=? AND state='pending' AND EXISTS(SELECT 1 FROM subscriptions s WHERE s.id=outbox.subscription_id AND s.generation=outbox.generation AND s.active=1)`, due.UnixNano(), safeKind(kind), d.ID, d.Generation, d.Revision)
+	res, err := s.db.ExecContext(ctx, `UPDATE outbox SET due=?,attempts=attempts+1,last_error=? WHERE id=? AND generation=? AND revision=? AND state='pending' AND EXISTS(SELECT 1 FROM subscriptions s WHERE s.id=outbox.subscription_id AND s.generation=outbox.generation AND (s.active=1 OR outbox.kind='reply'))`, due.UnixNano(), safeKind(kind), d.ID, d.Generation, d.Revision)
 	if err != nil {
 		return err
 	}
@@ -224,12 +221,12 @@ func (s *Store) RescheduleChannel(ctx context.Context, d notification.Delivery, 
 }
 
 func (s *Store) DeferDelivery(ctx context.Context, d notification.Delivery, due time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET due=? WHERE id=? AND generation=? AND revision=? AND state='pending' AND EXISTS(SELECT 1 FROM subscriptions s WHERE s.id=outbox.subscription_id AND s.generation=outbox.generation AND s.active=1)`, due.UnixNano(), d.ID, d.Generation, d.Revision)
+	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET due=? WHERE id=? AND generation=? AND revision=? AND state='pending' AND EXISTS(SELECT 1 FROM subscriptions s WHERE s.id=outbox.subscription_id AND s.generation=outbox.generation AND (s.active=1 OR outbox.kind='reply'))`, due.UnixNano(), d.ID, d.Generation, d.Revision)
 	return err
 }
 
 func (s *Store) MarkDeliveryUndeliverable(ctx context.Context, d notification.Delivery, kind string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET state='failed',last_error=? WHERE id=? AND generation=? AND revision=? AND state='pending' AND EXISTS(SELECT 1 FROM subscriptions s WHERE s.id=outbox.subscription_id AND s.generation=outbox.generation AND s.active=1)`, safeKind(kind), d.ID, d.Generation, d.Revision)
+	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET state='failed',last_error=? WHERE id=? AND generation=? AND revision=? AND state='pending' AND EXISTS(SELECT 1 FROM subscriptions s WHERE s.id=outbox.subscription_id AND s.generation=outbox.generation AND (s.active=1 OR outbox.kind='reply'))`, safeKind(kind), d.ID, d.Generation, d.Revision)
 	return err
 }
 
@@ -273,7 +270,7 @@ func (s *Store) ResolveAlreadyAccepted(ctx context.Context, d notification.Deliv
 }
 
 func (s *Store) RequeueFailed(ctx context.Context, channel subscription.Channel) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET state='pending',due=?,last_error='' WHERE state='failed' AND NOT(kind='main' AND event_key LIKE 'legacy:%') AND subscription_id IN (SELECT id FROM subscriptions WHERE channel=? AND active=1 AND generation=outbox.generation)`, time.Now().UTC().UnixNano(), channel)
+	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET state='pending',due=?,last_error='' WHERE state='failed' AND NOT(kind='main' AND event_key LIKE 'legacy:%') AND subscription_id IN (SELECT id FROM subscriptions WHERE channel=? AND generation=outbox.generation AND (active=1 OR outbox.kind='reply'))`, time.Now().UTC().UnixNano(), channel)
 	return err
 }
 

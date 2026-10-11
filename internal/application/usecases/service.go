@@ -19,6 +19,8 @@ import (
 )
 
 type Settings struct {
+	AllowedWhatsAppRecipients                                             []subscription.Identity
+	SourceMode                                                            string
 	Election                                                              election.Identity
 	Location                                                              *time.Location
 	PollInterval, BeforeInterval, FinalInterval, StaleAfter, DelayedAfter time.Duration
@@ -32,9 +34,14 @@ type Service struct {
 	clock             ports.Clock
 	settings          Settings
 	pollMu, publishMu sync.Mutex
+	allowedMu         sync.RWMutex
+	allowedWhatsApp   map[string]bool
 }
 
 func New(state ports.State, deliveries ports.Deliveries, provider ports.ResultsProvider, sender ports.NotificationSender, clock ports.Clock, settings Settings) *Service {
+	if settings.SourceMode == "" {
+		settings.SourceMode = "simulation"
+	}
 	if settings.Election.Year == 0 {
 		settings.Election = election.Identity{Year: 2026, Round: 2, Code: "6258", Scope: "br", Office: 1}
 	}
@@ -46,7 +53,11 @@ func New(state ports.State, deliveries ports.Deliveries, provider ports.ResultsP
 			counter.Add(context.Background(), 0)
 		}
 	}
-	return &Service{state: state, deliveries: deliveries, provider: provider, sender: sender, clock: clock, settings: settings}
+	allowed := make(map[string]bool, len(settings.AllowedWhatsAppRecipients))
+	for _, identity := range settings.AllowedWhatsAppRecipients {
+		allowed[identity.Key()] = true
+	}
+	return &Service{state: state, deliveries: deliveries, provider: provider, sender: sender, clock: clock, settings: settings, allowedWhatsApp: allowed}
 }
 func (s *Service) GetLatestResults(ctx context.Context) (election.Snapshot, error) {
 	r, e := s.state.Latest(ctx)
@@ -80,6 +91,13 @@ func (s *Service) Subscribe(ctx context.Context, identity subscription.Identity)
 	defer func() { finish(err) }()
 	if err = s.validateIdentity(identity); err != nil {
 		return err
+	}
+	if identity.Channel == subscription.WhatsApp {
+		s.allowedMu.RLock()
+		defer s.allowedMu.RUnlock()
+		if !s.allowedWhatsApp[identity.Key()] {
+			return errors.New("WhatsApp recipient is not allowlisted")
+		}
 	}
 	return s.state.Transaction(ctx, func(tx ports.Transaction) error { return s.subscribeTx(tx, identity, "", s.clock.Now()) })
 }
@@ -195,7 +213,9 @@ func (s *Service) ReconcileAllowedRecipients(ctx context.Context, allowed []subs
 		}
 		permitted[identity.Key()] = true
 	}
-	return s.state.Transaction(ctx, func(tx ports.Transaction) error {
+	s.allowedMu.Lock()
+	defer s.allowedMu.Unlock()
+	err := s.state.Transaction(ctx, func(tx ports.Transaction) error {
 		subs, err := tx.SubscriptionsFor(s.settings.Election, subscription.WhatsApp)
 		if err != nil {
 			return err
@@ -215,6 +235,11 @@ func (s *Service) ReconcileAllowedRecipients(ctx context.Context, allowed []subs
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.allowedWhatsApp = permitted
+	return nil
 }
 
 func (s *Service) freshness(snapshot election.Snapshot, status ports.MonitoringStatus) services.Freshness {

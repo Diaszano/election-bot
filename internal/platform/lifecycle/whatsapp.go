@@ -136,7 +136,7 @@ func bindWhatsAppAccount(ctx context.Context, c config.Config, jid string) error
 	} else {
 		state.AuthenticationRequired = false
 		state.PausedUntil = time.Time{}
-		state.PauseReason = ""
+		state.PauseReason = "connected"
 	}
 	state.AccountBinding = binding
 	if err = store.SaveChannelState(ctx, subscription.WhatsApp, state); err != nil {

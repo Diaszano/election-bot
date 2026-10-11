@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Diaszano/election-bot/internal/application/ports"
@@ -21,6 +22,12 @@ type messageAPI interface {
 }
 
 // Client adapts whatsmeow to the application's durable channel sender and connection contract.
+type InboundMessage struct {
+	MessageID, Text, ChatJID, SenderJID, SenderAltJID  string
+	ReceivedAt                                         time.Time
+	IsFromMe, IsGroup, IsNewsletter, IsHistory, IsEdit bool
+}
+
 type Client struct {
 	api         messageAPI
 	sdk         *wa.Client
@@ -28,16 +35,28 @@ type Client struct {
 	sendTimeout time.Duration
 	events      chan ConnectionEvent
 	handlerID   uint32
+	messages    chan InboundMessage
+	closed      chan struct{}
+	closeOnce   sync.Once
 }
 
 func NewClient(session *SessionStore, sendTimeout time.Duration) *Client {
 	sdk := wa.NewClient(session.Device(), waLog.Noop)
 	sdk.EnableAutoReconnect = false
-	c := &Client{api: sdk, sdk: sdk, session: session, sendTimeout: sendTimeout, events: make(chan ConnectionEvent, 32)}
+	c := &Client{api: sdk, sdk: sdk, session: session, sendTimeout: sendTimeout, events: make(chan ConnectionEvent, 32), messages: make(chan InboundMessage, 128), closed: make(chan struct{})}
 	c.handlerID = sdk.AddEventHandler(c.handleEvent)
 	return c
 }
+func (c *Client) Messages() <-chan InboundMessage { return c.messages }
 func (c *Client) handleEvent(raw any) {
+	if msg, ok := raw.(*events.Message); ok {
+		incoming := inboundMessage(msg)
+		select {
+		case c.messages <- incoming:
+		case <-c.closed:
+		}
+		return
+	}
 	var event ConnectionEvent
 	switch evt := raw.(type) {
 	case *events.Connected:
@@ -72,6 +91,23 @@ func (c *Client) handleEvent(raw any) {
 		}
 	}
 }
+func inboundMessage(evt *events.Message) InboundMessage {
+	raw := evt.Message
+	if evt.RawMessage != nil {
+		raw = evt.UnwrapRaw().Message
+	}
+	text := ""
+	if raw != nil {
+		if value := raw.GetConversation(); value != "" {
+			text = value
+		} else if extended := raw.GetExtendedTextMessage(); extended != nil {
+			text = extended.GetText()
+		}
+	}
+	info := evt.Info
+	return InboundMessage{MessageID: string(info.ID), Text: text, ChatJID: info.Chat.String(), SenderJID: info.Sender.String(), SenderAltJID: info.SenderAlt.String(), ReceivedAt: info.Timestamp, IsFromMe: info.IsFromMe, IsGroup: info.IsGroup, IsNewsletter: info.Chat.Server == types.NewsletterServer || evt.NewsletterMeta != nil, IsHistory: evt.SourceWebMsg != nil, IsEdit: evt.IsEdit || info.Edit != types.EditAttributeEmpty}
+}
+
 func (c *Client) Paired() bool {
 	return c.session != nil && c.session.Device() != nil && c.session.Device().ID != nil
 }
@@ -83,6 +119,9 @@ func (c *Client) Disconnect() {
 }
 func (c *Client) Events() <-chan ConnectionEvent { return c.events }
 func (c *Client) Close() error {
+	if c.closed != nil {
+		c.closeOnce.Do(func() { close(c.closed) })
+	}
 	if c.sdk != nil {
 		c.sdk.RemoveEventHandler(c.handlerID)
 		c.sdk.Disconnect()
