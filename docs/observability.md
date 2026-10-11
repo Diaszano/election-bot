@@ -35,9 +35,35 @@ These names/resource labels were checked against the running Collector exporter,
 
 Histogram boundaries in seconds: .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30. Prometheus adds `_bucket`, `_sum`, `_count`. Labels include `service_name`, `service_namespace`, `service_version`, `deployment_environment`; scrape `job` is `election-bot`, while converted resource job may appear as `exported_job`. Never select subscriptions by private IDs.
 
+### WhatsApp Prometheus metrics
+
+When WhatsApp and `WHATSAPP_TELEMETRY_ENABLED` are both enabled, the following bounded metrics are registered:
+
+| Name | Type / meaning |
+|---|---|
+| `whatsapp_connection_state` | Gauge: 0 unknown, 1 connected, 2 connecting, 3 disconnected, 4 restricted, 5 outdated client, 6 authentication required |
+| `whatsapp_subscribers` | Gauge of authorized active subscriptions |
+| `whatsapp_pending_outbox` | Gauge of pending outbox deliveries |
+| `whatsapp_failed_outbox` | Gauge of failed outbox deliveries |
+| `whatsapp_last_success_timestamp_seconds` | Gauge: Unix epoch of latest API acceptance |
+| `whatsapp_messages_sent_total` | Counter of successful WhatsApp sends |
+| `whatsapp_messages_edited_total` | Counter of successful WhatsApp edits |
+| `whatsapp_delivery_failures_total` | Counter of failed delivery attempts (deferrals do not count as failures) |
+| `whatsapp_reconnects_total` | Counter of reconnection attempts |
+| `whatsapp_message_send_duration_seconds` | Histogram of outbound API attempt duration |
+
+API acceptance is not a confirmed delivery or read receipt. Deferrals do not increment failure counters. If WhatsApp telemetry is disabled via `WHATSAPP_TELEMETRY_ENABLED=false`, these instruments are not registered and the shared trace/metric/log pipeline remains unchanged. No recipient JID, phone number, message text, QR payload, or encryption key is ever included in metric labels or span attributes.
+
+### Logical spans
+
+Spans follow OpenTelemetry semantic conventions with sanitized, token-free names:
+- Telegram: `telegram.send_message`, `telegram.edit_message`, and command long-polling spans.
+- WhatsApp: `whatsapp.send_message`, `whatsapp.edit_message`, `whatsapp.connect`, and `whatsapp.command`.
+- Upstream: TSE HTTP spans propagate W3C TraceContext headers.
+
 ## Backends and dashboards
 
-Collector: OTLP 4317/4318 → memory limiter/batch → Tempo OTLP, Prometheus exporter 8889 and Loki native `/otlp` via `otlphttp`. Collector self-metrics are scraped on 8888. No deprecated Loki exporter is used. Loki uses v13 TSDB and structured metadata; resource `service.name` becomes label `service_name`.
+Collector: OTLP 4317/4318 → memory limiter/batch → Tempo OTLP, Prometheus exporter 8889 and Loki native `/otlp` via `otlphttp`. Collector self-metrics are scraped on 8888. No deprecated Loki exporter is used. Loki uses v13 TSDB and structured metadata; resource `service.name` becomes label `service_name`. The Overview dashboard retains Telegram panels and adds WhatsApp connection, accepted sends/edits, failures, reconnects, authorized subscribers, pending work, latency and time since API acceptance. The Telemetry dashboard includes WhatsApp operation errors, latency and TraceQL filtering. WhatsApp spans use sanitized operation names and errors; no phone number, JID, text, QR payload or device credential is exported.
 
 Tempo 3.1 uses its documented single-binary configuration without an `ingester` section or Kafka. Grafana sources have UIDs `prometheus`, `tempo`, `loki`. **Election Bot — Overview** covers poll health, freshness, section progress, Telegram delivery/subscribers/latency and HTTP readiness. **Election Bot — Telemetry** provides logs, TraceQL search, operation errors, slow requests and Collector health. TraceQL search uses actual Tempo traces, not nonexistent Prometheus span metrics.
 

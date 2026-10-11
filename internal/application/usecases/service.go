@@ -13,11 +13,15 @@ import (
 	"go.opentelemetry.io/otel"
 	"log/slog"
 	"math/rand/v2"
+	"strconv"
 	"sync"
 	"time"
 )
 
 type Settings struct {
+	AllowedWhatsAppRecipients                                             []subscription.Identity
+	SourceMode                                                            string
+	Election                                                              election.Identity
 	Location                                                              *time.Location
 	PollInterval, BeforeInterval, FinalInterval, StaleAfter, DelayedAfter time.Duration
 	CountingStart                                                         time.Time
@@ -30,9 +34,17 @@ type Service struct {
 	clock             ports.Clock
 	settings          Settings
 	pollMu, publishMu sync.Mutex
+	allowedMu         sync.RWMutex
+	allowedWhatsApp   map[string]bool
 }
 
 func New(state ports.State, deliveries ports.Deliveries, provider ports.ResultsProvider, sender ports.NotificationSender, clock ports.Clock, settings Settings) *Service {
+	if settings.SourceMode == "" {
+		settings.SourceMode = "simulation"
+	}
+	if settings.Election.Year == 0 {
+		settings.Election = election.Identity{Year: 2026, Round: 2, Code: "6258", Scope: "br", Office: 1}
+	}
 	for _, name := range []string{"election_poll", "election_poll_errors", "election_snapshot_changes", "telegram_messages_sent", "telegram_messages_edited", "telegram_notifications_failed", "telegram_api_requests"} {
 		counter, e := otel.Meter("election-bot").Int64Counter(name)
 		if e != nil {
@@ -41,7 +53,11 @@ func New(state ports.State, deliveries ports.Deliveries, provider ports.ResultsP
 			counter.Add(context.Background(), 0)
 		}
 	}
-	return &Service{state: state, deliveries: deliveries, provider: provider, sender: sender, clock: clock, settings: settings}
+	allowed := make(map[string]bool, len(settings.AllowedWhatsAppRecipients))
+	for _, identity := range settings.AllowedWhatsAppRecipients {
+		allowed[identity.Key()] = true
+	}
+	return &Service{state: state, deliveries: deliveries, provider: provider, sender: sender, clock: clock, settings: settings, allowedWhatsApp: allowed}
 }
 func (s *Service) GetLatestResults(ctx context.Context) (election.Snapshot, error) {
 	r, e := s.state.Latest(ctx)
@@ -62,71 +78,181 @@ func (s *Service) GetMonitoringStatus(ctx context.Context) (ports.MonitoringStat
 	status.PublishedAt = latest.Snapshot.Published
 	return status, nil
 }
-func (s *Service) SubscribeUser(ctx context.Context, chat int64) (err error) {
+func (s *Service) SubscribeUser(ctx context.Context, chat int64) error {
+	identity, err := subscription.NewIdentity(s.settings.Election, subscription.Telegram, fmt.Sprint(chat))
+	if err != nil {
+		return err
+	}
+	return s.Subscribe(ctx, identity)
+}
+
+func (s *Service) Subscribe(ctx context.Context, identity subscription.Identity) (err error) {
 	ctx, finish := services.Operation(ctx, "subscriptions.create")
 	defer func() { finish(err) }()
-	if chat <= 0 {
-		return errors.New("subscriptions require private chats")
+	if err = s.validateIdentity(identity); err != nil {
+		return err
 	}
-	return s.state.Transaction(ctx, func(tx ports.Transaction) error {
-		sub, e := tx.Subscription(chat)
-		if e != nil && !errors.Is(e, ports.ErrNotFound) {
-			return e
+	if identity.Channel == subscription.WhatsApp {
+		s.allowedMu.RLock()
+		defer s.allowedMu.RUnlock()
+		if !s.allowedWhatsApp[identity.Key()] {
+			return errors.New("WhatsApp recipient is not allowlisted")
 		}
-		if e == nil && sub.Active {
-			return nil
+	}
+	return s.state.Transaction(ctx, func(tx ports.Transaction) error { return s.subscribeTx(tx, identity, "", s.clock.Now()) })
+}
+
+func (s *Service) subscribeTx(tx ports.Transaction, identity subscription.Identity, incomingID string, at time.Time) error {
+	sub, err := tx.SubscriptionByIdentity(identity)
+	if err != nil && !errors.Is(err, ports.ErrNotFound) {
+		return err
+	}
+	if err == nil && sub.Active {
+		return nil
+	}
+	sub.Identity, sub.ChatID, sub.Active = identity, 0, true
+	if identity.Channel == subscription.Telegram {
+		sub.ChatID, _ = strconv.ParseInt(identity.Recipient, 10, 64)
+	}
+	sub.Generation++
+	sub.ResultsEnabled, sub.MilestonesEnabled = true, true
+	latest, err := tx.Latest()
+	if err != nil && !errors.Is(err, ports.ErrNoSnapshot) {
+		return err
+	}
+	sub.Baseline = 0
+	if err == nil {
+		sub.Baseline = int(latest.Snapshot.Progress / 100)
+	}
+	if err = tx.PutSubscription(sub); err != nil {
+		return err
+	}
+	sub, err = tx.SubscriptionByIdentity(identity)
+	if err != nil {
+		return err
+	}
+	if incomingID != "" {
+		if err = tx.AuditSubscription(sub, "opt_in", incomingID, at); err != nil {
+			return err
 		}
-		sub.ChatID = chat
-		sub.Active = true
+	}
+	if latest.Snapshot.ID == "" {
+		return nil
+	}
+	status, err := tx.Status()
+	if err != nil {
+		return err
+	}
+	return tx.Enqueue(s.main(sub, latest.Snapshot, status))
+}
+
+func (s *Service) UnsubscribeUser(ctx context.Context, chat int64) error {
+	identity, err := subscription.NewIdentity(s.settings.Election, subscription.Telegram, fmt.Sprint(chat))
+	if err != nil {
+		return err
+	}
+	return s.Unsubscribe(ctx, identity)
+}
+
+func (s *Service) Unsubscribe(ctx context.Context, identity subscription.Identity) (err error) {
+	ctx, finish := services.Operation(ctx, "subscriptions.delete")
+	defer func() { finish(err) }()
+	if err = s.validateIdentity(identity); err != nil {
+		return err
+	}
+	return s.state.Transaction(ctx, func(tx ports.Transaction) error { return s.unsubscribeTx(tx, identity, "", s.clock.Now()) })
+}
+
+func (s *Service) unsubscribeTx(tx ports.Transaction, identity subscription.Identity, incomingID string, at time.Time) error {
+	sub, err := tx.SubscriptionByIdentity(identity)
+	if errors.Is(err, ports.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !sub.Active {
+		return nil
+	}
+	sub.Active = false
+	if incomingID != "" {
 		sub.Generation++
-		sub.ResultsEnabled = true
-		sub.MilestonesEnabled = true
-		latest, e := tx.Latest()
-		if e != nil && !errors.Is(e, ports.ErrNoSnapshot) {
-			return e
+	}
+	if err = tx.PutSubscription(sub); err != nil {
+		return err
+	}
+	if err = tx.CancelIdentity(identity); err != nil {
+		return err
+	}
+	if incomingID != "" {
+		sub, err = tx.SubscriptionByIdentity(identity)
+		if err != nil {
+			return err
 		}
-		sub.Baseline = 0
-		if e == nil {
-			sub.Baseline = int(latest.Snapshot.Progress / 100)
+		return tx.AuditSubscription(sub, "opt_out", incomingID, at)
+	}
+	return nil
+}
+
+func (s *Service) validateIdentity(identity subscription.Identity) error {
+	if identity.Election != s.settings.Election {
+		return errors.New("subscription election does not match application")
+	}
+	_, err := subscription.NewIdentity(identity.Election, identity.Channel, identity.Recipient)
+	return err
+}
+
+func (s *Service) ReconcileAllowedRecipients(ctx context.Context, allowed []subscription.Identity) error {
+	permitted := make(map[string]bool, len(allowed))
+	for _, identity := range allowed {
+		if identity.Channel != subscription.WhatsApp {
+			return errors.New("allowlist only accepts WhatsApp identities")
 		}
-		if e = tx.PutSubscription(sub); e != nil {
-			return e
+		if err := s.validateIdentity(identity); err != nil {
+			return err
 		}
-		if latest.Snapshot.ID != "" {
-			status, e := tx.Status()
-			if e != nil {
-				return e
+		permitted[identity.Key()] = true
+	}
+	s.allowedMu.Lock()
+	defer s.allowedMu.Unlock()
+	err := s.state.Transaction(ctx, func(tx ports.Transaction) error {
+		subs, err := tx.SubscriptionsFor(s.settings.Election, subscription.WhatsApp)
+		if err != nil {
+			return err
+		}
+		for _, sub := range subs {
+			if permitted[sub.Identity.Key()] {
+				continue
 			}
-			return tx.Enqueue(s.main(sub, latest.Snapshot, status))
+			sub.Active = false
+			sub.Generation++
+			if err = tx.PutSubscription(sub); err != nil {
+				return err
+			}
+			if err = tx.CancelIdentity(sub.Identity); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.allowedWhatsApp = permitted
+	return nil
 }
-func (s *Service) UnsubscribeUser(ctx context.Context, chat int64) (err error) {
-	ctx, finish := services.Operation(ctx, "subscriptions.delete")
-	defer func() { finish(err) }()
-	return s.state.Transaction(ctx, func(tx ports.Transaction) error {
-		sub, e := tx.Subscription(chat)
-		if errors.Is(e, ports.ErrNotFound) {
-			return nil
-		}
-		if e != nil {
-			return e
-		}
-		sub.Active = false
-		if e = tx.PutSubscription(sub); e != nil {
-			return e
-		}
-		return tx.Cancel(chat)
-	})
-}
+
 func (s *Service) freshness(snapshot election.Snapshot, status ports.MonitoringStatus) services.Freshness {
 	active := snapshot.Status == election.Counting
 	return services.Freshness{Stale: active && (status.LastSuccess.IsZero() || s.clock.Now().Sub(status.LastSuccess) > s.settings.StaleAfter), Delayed: active && s.clock.Now().Sub(snapshot.Published) > s.settings.DelayedAfter, LastSuccess: status.LastSuccess}
 }
 func (s *Service) main(sub subscription.Subscription, snapshot election.Snapshot, status ports.MonitoringStatus) notification.Delivery {
 	fresh := s.freshness(snapshot, status)
-	return notification.Delivery{ChatID: sub.ChatID, Generation: sub.Generation, Kind: "main", Revision: fmt.Sprintf("%s:%t:%t", snapshot.Fingerprint(), fresh.Stale, fresh.Delayed), Text: services.FormatResults(snapshot, fresh, s.settings.Location), Due: s.clock.Now()}
+	text := services.FormatResults(snapshot, fresh, s.settings.Location)
+	if sub.Identity.Channel == subscription.WhatsApp {
+		text = services.FormatWhatsAppResults(snapshot, s.settings.Location, fresh)
+	}
+	return notification.Delivery{ChatID: sub.ChatID, Identity: sub.Identity, Generation: sub.Generation, Kind: "main", Revision: fmt.Sprintf("%s:%t:%t", snapshot.Fingerprint(), fresh.Stale, fresh.Delayed), Text: text, Due: s.clock.Now()}
 }
 func EvaluateMilestoneAlerts(previous, current election.Percentage, baseline int) []int {
 	var r []int
@@ -198,7 +324,7 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 			return nil
 		}
 		acceptedChange = changed
-		subs, e := tx.Subscriptions()
+		subs, e := tx.SubscriptionsFor(snapshot.Identity, "")
 		if e != nil {
 			return e
 		}
@@ -214,7 +340,11 @@ func (s *Service) ProcessElectionSnapshot(ctx context.Context, r ports.FetchResu
 			}
 			if changed && sub.MilestonesEnabled {
 				for _, m := range EvaluateMilestoneAlerts(previous, snapshot.Progress, sub.Baseline) {
-					if e = tx.Enqueue(notification.Delivery{ChatID: sub.ChatID, Generation: sub.Generation, Kind: "milestone", Milestone: m, Revision: fmt.Sprintf("milestone-%d", m), Text: services.FormatMilestone(snapshot, m, s.settings.Location), Due: s.clock.Now()}); e != nil {
+					text := services.FormatMilestone(snapshot, m, s.settings.Location)
+					if sub.Identity.Channel == subscription.WhatsApp {
+						text = services.FormatWhatsAppMilestone(snapshot, m)
+					}
+					if e = tx.Enqueue(notification.Delivery{ChatID: sub.ChatID, Identity: sub.Identity, Generation: sub.Generation, Kind: "milestone", Milestone: m, Revision: fmt.Sprintf("milestone-%d", m), Text: text, Due: s.clock.Now()}); e != nil {
 						return e
 					}
 				}
@@ -335,7 +465,7 @@ func (s *Service) refreshFreshness(ctx context.Context) error {
 		if e = tx.SetStatus(st); e != nil {
 			return e
 		}
-		subs, e := tx.Subscriptions()
+		subs, e := tx.SubscriptionsFor(latest.Snapshot.Identity, "")
 		if e != nil {
 			return e
 		}

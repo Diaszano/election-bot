@@ -7,3 +7,7 @@
 bin
 data
 *.db*
+
+# WhatsApp linked-device credentials
+whatsapp-session.db*
+*.session.lock

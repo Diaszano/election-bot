@@ -2,9 +2,10 @@ package observability
 
 import (
 	"context"
+	"time"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
-	"time"
 )
 
 type Values struct {
@@ -14,10 +15,18 @@ type Values struct {
 	Failures                         int
 	OldestPending                    time.Time
 	Counting                         bool
+	WhatsAppConnectionState          int64
+	WhatsAppSubscribers              int64
+	WhatsAppPending, WhatsAppFailed  int64
+	WhatsAppLastSuccess              time.Time
 }
 
-func RegisterState(read func(context.Context) (Values, error)) error {
-	m := otel.Meter("election-bot")
+func RegisterState(read func(context.Context) (Values, error), whatsappTelemetry ...bool) error {
+	enabled := len(whatsappTelemetry) > 0 && whatsappTelemetry[0]
+	return registerState(otel.Meter("election-bot"), read, enabled)
+}
+
+func registerState(m metric.Meter, read func(context.Context) (Values, error), whatsappTelemetry bool) error {
 	names := []string{"election_last_success_timestamp", "election_publication_timestamp", "election_counted_sections_ratio", "election_valid_votes", "telegram_subscribers", "telegram_outbox_pending", "telegram_outbox_oldest_age", "election_counting_active", "election_poll_consecutive_failures"}
 	gauges := make([]metric.Float64ObservableGauge, len(names))
 	for i, n := range names {
@@ -60,5 +69,8 @@ func RegisterState(read func(context.Context) (Values, error)) error {
 		}
 		return nil
 	}, instruments...)
-	return e
+	if e != nil || !whatsappTelemetry {
+		return e
+	}
+	return registerWhatsAppMetrics(m, read)
 }
