@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/Diaszano/election-bot/internal/domain/election"
 	"github.com/Diaszano/election-bot/migrations"
@@ -286,23 +286,63 @@ func TestMigrationBackupRestore(t *testing.T) {
 	if err := prior.QueryRow(`SELECT state FROM outbox WHERE id=10`).Scan(&status); err != nil || status != "pending" {
 		t.Fatalf("previous binary sees original pending state %q err=%v", status, err)
 	}
-	_ = prior.Close()
-	previous, err := Open(ctx, backup)
+	var previousPending int
+	if err := prior.QueryRow(`SELECT count(*) FROM outbox WHERE state='pending' AND generation=7 AND chat=42`).Scan(&previousPending); err != nil || previousPending != 5 {
+		t.Fatalf("previous-version repository query could not recover pending work: count=%d err=%v", previousPending, err)
+	}
+}
+
+func TestOpenCreatesConsistentPreMigrationBackup(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "application.db")
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
-		t.Fatalf("previous repository cannot reopen restored backup: %v", err)
+		t.Fatal(err)
 	}
-	defer previous.Close()
-	pending, err := previous.Pending(ctx, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC), 100)
+	if _, err = db.Exec(migrations.Initial); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO subscriptions(chat,active,generation,baseline,results_enabled,milestones_enabled,message_id) VALUES(77,1,4,50,1,1,808)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO outbox(chat,generation,kind,milestone,revision,text,due,attempts,state,last_error) VALUES(77,4,'milestone',50,'m50','preserve me',123,2,'failed','retry')`); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenForElection(ctx, path, election.Identity{Year: 2026, Round: 2, Code: "6258", Scope: "br", Office: 1})
 	if err != nil {
-		t.Fatalf("previous repository cannot read restored pending work: %v", err)
+		t.Fatal(err)
 	}
-	foundOld := false
-	for _, delivery := range pending {
-		if delivery.ID == 10 {
-			foundOld = true
-		}
+	defer store.Close()
+	dirs, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".election-bot-pre-v2-*"))
+	if err != nil || len(dirs) != 1 {
+		t.Fatalf("pre-migration backup dirs=%v err=%v", dirs, err)
 	}
-	if !foundOld {
-		t.Fatal("previous repository did not recover original pending main notification")
+	backup, err := sql.Open("sqlite", filepath.Join(dirs[0], "elections.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	var version int
+	var text, state string
+	var generation, attempts int
+	var due int64
+	if err = backup.QueryRow(`SELECT max(version) FROM schema_version`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("backup version=%d err=%v", version, err)
+	}
+	if err = backup.QueryRow(`SELECT generation,text,due,attempts,state FROM outbox`).Scan(&generation, &text, &due, &attempts, &state); err != nil {
+		t.Fatal(err)
+	}
+	if generation != 4 || text != "preserve me" || due != 123 || attempts != 2 || state != "failed" {
+		t.Fatalf("backup row not preserved: %d %q %d %d %q", generation, text, due, attempts, state)
+	}
+	info, err := os.Stat(filepath.Join(dirs[0], "elections.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("backup mode=%o", info.Mode().Perm())
 	}
 }

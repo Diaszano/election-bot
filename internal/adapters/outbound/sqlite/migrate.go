@@ -19,6 +19,10 @@ type legacyRow struct {
 	Milestone int
 }
 
+func electionIdentityKey(e election.Identity) string {
+	return fmt.Sprintf("%d/%d/%d/%q/%q", e.Year, e.Round, e.Office, e.Code, e.Scope)
+}
+
 type legacyDelivery struct {
 	legacyRow
 	Generation int64
@@ -33,12 +37,14 @@ type legacyDelivery struct {
 func legacyEventKeys(rows []legacyRow) (map[int64]string, error) {
 	result := make(map[int64]string, len(rows))
 	groups := make(map[string][]legacyRow)
+	byID := make(map[int64]legacyRow, len(rows))
 	ids := make(map[int64]bool, len(rows))
 	for _, row := range rows {
 		if row.ID <= 0 || row.Chat <= 0 || ids[row.ID] {
 			return nil, errors.New("invalid legacy outbox identity")
 		}
 		ids[row.ID] = true
+		byID[row.ID] = row
 		groups[fmt.Sprintf("%d\x00%s", row.Chat, row.Kind)] = append(groups[fmt.Sprintf("%d\x00%s", row.Chat, row.Kind)], row)
 	}
 	for _, group := range groups {
@@ -47,7 +53,8 @@ func legacyEventKeys(rows []legacyRow) (map[int64]string, error) {
 			if row.Kind != "main" {
 				continue
 			}
-			if canonical == 0 || (row.Milestone == 0 && findLegacy(rows, canonical).Milestone != 0) || (row.Milestone == findLegacy(rows, canonical).Milestone && row.ID < canonical) {
+			current := byID[canonical]
+			if canonical == 0 || (row.Milestone == 0 && current.Milestone != 0) || (row.Milestone == current.Milestone && row.ID < canonical) {
 				canonical = row.ID
 			}
 		}
@@ -70,15 +77,6 @@ func legacyEventKeys(rows []legacyRow) (map[int64]string, error) {
 		}
 	}
 	return result, nil
-}
-
-func findLegacy(rows []legacyRow, id int64) legacyRow {
-	for _, row := range rows {
-		if row.ID == id {
-			return row
-		}
-	}
-	return legacyRow{}
 }
 
 func migrateV2(ctx context.Context, db *sql.DB, electionID election.Identity) error {

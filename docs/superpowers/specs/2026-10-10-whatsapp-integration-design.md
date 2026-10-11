@@ -136,7 +136,7 @@ Create `migrations/002_channel_notifications.sql`; do not edit migration 001. Ex
 | `channel_state` | Private account binding, persistent authentication-required/pause state, and global outbound cooldown recovery metadata |
 | Existing snapshot, monitoring, command offset | Preserve current contents and conditional-request behavior unchanged |
 
-Channel is obtained from the subscription relationship when querying outbox work; do not maintain a second contradictory channel identity on a job. Main jobs use event key `main`; milestone jobs use `milestone:<threshold>`; command replies use `command:<incoming-message-id>`. Enforce unique `(subscription_id, kind, event_key)`.
+Channel is obtained from the subscription relationship when querying outbox work; do not maintain a second contradictory channel identity on a job. Preserve migrated legacy event keys, including the canonical legacy `main` key. New main jobs use `main:<subscription-generation>` so live coalescing never overwrites a migrated row or crosses an opt-out/opt-in boundary; milestone jobs use `milestone:<threshold>`; command replies use `command:<incoming-message-id>`. Reserve the `legacy:` prefix for migration. Enforce unique `(subscription_id, kind, event_key)`.
 
 Milestone uniqueness excludes subscription generation so a percentage correction or stop/start cycle cannot recreate a historical alert. Generations still prevent delivery to an obsolete subscription lifecycle. Keep canceled and accepted milestone records as history. Baselines prevent historical alerts for new subscribers.
 
