@@ -1,0 +1,58 @@
+name: Bug Report
+description: File a bug report to help improve election-bot
+title: "fix: <short description of the bug>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please provide as much detail as possible to help us diagnose and resolve the bug quickly.
+  - type: textarea
+    id: problem-description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe what happened...
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Detailed steps to reproduce the behavior.
+      placeholder: |
+        1. Run '...'
+        2. Set environment variable '...'
+        3. Observe error '...'
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual Behavior
+      description: What actually happened instead.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment Info
+      description: Operating System, Go version, Docker version, etc.
+      placeholder: Linux amd64, Go 1.27, Docker 27.x
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs or Output
+      description: Please copy and paste any relevant logs, terminal output, or stack traces (ensure no sensitive tokens or phone numbers are included).
+      render: shell
+    validations:
+      required: false
