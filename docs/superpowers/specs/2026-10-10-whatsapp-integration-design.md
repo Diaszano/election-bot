@@ -4,9 +4,9 @@
 - Project: election-bot
 - Go module: `github.com/Diaszano/election-bot`
 - Branch: `feat/whatsapp-integration`
-- Status: Architecture approved; written specification submitted for final review.
+- Status: Specification approved with final refinements incorporated; implementation plan preparation authorized.
 
-This specification incorporates the approved conversational architecture and the additional migration, identity, editing, session security, and isolation requirements. It authorizes no product implementation by itself. The written-spec review precedes the implementation plan and its review. Dependencies have not been installed for this feature, and real WhatsApp pairing and delivery have not been validated.
+This specification incorporates the approved conversational architecture and the additional migration, identity, editing, session security, and isolation requirements, including all approved final refinements (session selection verification, SQLite migration compatibility, digest deduplication against accepted presentation revisions, and stable send request IDs). It authorizes implementation planning via `superpowers:writing-plans`. Dependencies have not been installed for this feature, and real WhatsApp pairing and delivery have not been validated.
 
 ## 1. Scope and preserved behavior
 
