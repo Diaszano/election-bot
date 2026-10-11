@@ -282,11 +282,11 @@ func TestCIWorkflow(t *testing.T) {
 	// 9. Verify Job 'security'
 	if job, ok := jobs["security"]; ok {
 		jobStr := strings.Join(job.lines, "\n")
-		if !strings.Contains(jobStr, "golang/govulncheck-action@b331f47137f8f83734661845cc877fa6992d9aa3") {
-			t.Errorf("security job must run govulncheck via golang/govulncheck-action@b331f47137f8f83734661845cc877fa6992d9aa3")
+		if !strings.Contains(jobStr, "golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee") {
+			t.Errorf("security job must run govulncheck via golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee")
 		}
-		if !strings.Contains(jobStr, "gitleaks/gitleaks-action@f9076d2be247bf23703975ba6fe6e0362bc462b1") {
-			t.Errorf("security job must run gitleaks via gitleaks/gitleaks-action@f9076d2be247bf23703975ba6fe6e0362bc462b1")
+		if !strings.Contains(jobStr, "gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e") {
+			t.Errorf("security job must run gitleaks via gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e")
 		}
 		if !strings.Contains(jobStr, "actions/dependency-review-action@5a2ce3f5b92ee19cbb1541a4984c76d921601d7c") {
 			t.Errorf("security job must run dependency-review via actions/dependency-review-action@5a2ce3f5b92ee19cbb1541a4984c76d921601d7c")
@@ -299,8 +299,8 @@ func TestCIWorkflow(t *testing.T) {
 		if !strings.Contains(jobStr, "docker/setup-buildx-action") {
 			t.Errorf("docker-validation job must use Docker Buildx")
 		}
-		if !strings.Contains(jobStr, "aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0") {
-			t.Errorf("docker-validation job must run Trivy via aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0")
+		if !strings.Contains(jobStr, "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25") {
+			t.Errorf("docker-validation job must run Trivy via aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25")
 		}
 		if !strings.Contains(jobStr, "CRITICAL") {
 			t.Errorf("docker-validation job must configure Trivy failing on CRITICAL")

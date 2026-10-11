@@ -86,6 +86,16 @@ Date: 2026-10-10 / 2026-10-11. Implementation branches: `feat/election-bot` (Tel
 | **Docker container build** | `docker build -t election-bot:test .` succeeded (15/15 stages finished). | PASS |
 | **Docker container smoke test** | Started `election-bot:test` with `DATA_SOURCE_MODE=simulation`; verified HTTP 200 on `/health/ready` and `/health/live`; verified CLI `version` and `version --json` inside container; verified clean SIGTERM shutdown and removal. | PASS |
 
+## Executed evidence — Remote CI/CD Activation & Verification (`main` push)
+
+| Remote Run / Gate | Target Commit | Status & Evidence | Result |
+|---|---|---|---|
+| **Standards & Governance (`standards`)** | `6738da8` | Run ID `38167991759`. Successfully checked out code, ran `dev-check branch` and `dev-check release-config`. | PASS |
+| **Go Quality & Tests (`go-quality`)** | `6738da8` | Run ID `38167991759`. Failed due to `/bin/sh: 1: rg: not found` during `make lint`. Corrected by replacing `rg` with portable POSIX `grep`. | FAIL (Diagnosed & Fixed) |
+| **Security & Scanning (`security`)** | `6738da8` | Run ID `38167991759`. Failed during action download: `gitleaks-action` and `govulncheck-action` pinned to unresolvable commit hashes. Updated to verified tag commit hashes (`v3.0.0` and `v1.0.4`). | FAIL (Diagnosed & Fixed) |
+| **Docker Validation (`docker-validation`)** | `6738da8` | Run ID `38167991759`. Failed during action download: `aquasecurity/trivy-action` composite step tried to resolve non-existent setup-trivy `v0.2.2`. Updated trivy-action to `v0.36.0` (`ed142fd0673e97e23eac54620cfb913e5ce36c25`). | FAIL (Diagnosed & Fixed) |
+| **Release & Publishing (`release.yml`)** | `6738da8` | Run ID `38167991688`. Failed-safe in `verify-release-commit`: correctly detected that mandatory CI checks failed and refused to create tags or publish artifacts. | PASS (Fail-Closed Safety Working) |
+
 ## Integration boundary and limitations
 
 1. **No Real WhatsApp Account Pairing or Messaging**: No real WhatsApp phone number, credentials, or session keys were used during validation. All WhatsApp adapter behavior was validated against deterministic fake clients, simulated network connections, and offline session stores. whatsmeow is an unofficial WhatsApp Web client. Account restriction or suspension remains an inherent operational risk of automated messaging on WhatsApp, even at low volumes. The official WhatsApp Business Platform is the recommended long-term solution for official production messaging.
@@ -93,9 +103,10 @@ Date: 2026-10-10 / 2026-10-11. Implementation branches: `feat/election-bot` (Tel
 3. **Official TSE Runoff Contract**: Official mode remains fail-closed by design (`DATA_SOURCE_MODE=official` halts startup). TSE EA20 contract documentation returned HTTP 403, and national runoff winner confirmation fields remain unverified against official production APIs.
 4. **Schema Migration Integrity**: `migrations/001_initial.sql` was verified to be completely unmodified. Database migration from v1 to v2 is strictly non-destructive.
 5. **Privacy and Secret Scanning**: Scanned all tracked files, commit history, and staging. Zero tokens, passwords, real recipient phone numbers, private JIDs, QR codes, or encryption keys are present in repository files. Tracked `.env.example` contains only placeholder values.
-6. **No Remote GitHub Push or Live Actions Execution**: In accordance with the project safety boundary, no commits were pushed to remote GitHub, and no live GitHub Actions workflows were triggered on GitHub servers. All workflow files were validated locally using structural, syntax, and permission tests.
+6. **Remote CI/CD Execution**: First push of `main` to `origin` was completed. The mandatory CI jobs ran on GitHub Actions runners, surfacing three environmental action pinning issues which were isolated, reproduced locally, and resolved in branch `ci/remote-actions-validation`.
 7. **No Remote GHCR Container Publishing**: No container images were pushed to remote `ghcr.io/diaszano/election-bot`. Container builds, multi-platform compatibility, and smoke tests were executed locally.
 8. **No Remote Release or Tag Mutation**: No Git tags were pushed and no actual GitHub Releases were published. Release Please configuration was validated via dry-run and unit tests.
+9. **GHCR Artifact Cryptographic Identity Audit**: Verified that Docker Buildx layer cache reuse does not constitute mathematical cryptographic proof of artifact identity between locally scanned candidates and the multi-architecture manifest published to GHCR. Prior to production release, this must be migrated to a digest-pinned pattern.
 
 ## Decisions and operational boundaries
 
