@@ -47,7 +47,7 @@
 - Produces: `version.Info`, `version.Get() Info`, `version.String() string`, `version.JSON() (string, error)`
 - Consumes: Go standard library (`runtime`, `runtime/debug`, `encoding/json`, `fmt`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 // internal/platform/version/version_test.go
@@ -96,12 +96,12 @@ func TestVersionStringAndJSON(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test -v ./internal/platform/version -run TestVersionDefaults`
 Expected: FAIL with undefined package `version`
 
-- [ ] **Step 3: Implement minimal version package**
+- [x] **Step 3: Implement minimal version package**
 
 ```go
 // internal/platform/version/version.go
@@ -185,17 +185,17 @@ func JSON() (string, error) {
 }
 ```
 
-- [ ] **Step 4: Wire CLI command and OpenTelemetry version**
+- [x] **Step 4: Wire CLI command and OpenTelemetry version**
 
 In `cmd/election-bot/main.go`, support `election-bot version` and `election-bot version --json`.
 In `internal/platform/lifecycle/run.go`, replace `"dev"` with `version.Get().Version` in `observability.Setup(ctx, c, version.Get().Version)` and log version in structured startup log.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `go test -v ./internal/platform/version ./cmd/election-bot -count=1`
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add internal/platform/version/ cmd/election-bot/ internal/platform/lifecycle/run.go
@@ -214,7 +214,7 @@ git commit -m "feat(version): add centralized version metadata and cli command"
 - Produces: CLI `dev-check commit`, `dev-check branch`, `dev-check pr-title`, `dev-check release-config`
 - Consumes: Standard library (`regexp`, `strings`, `os`, `fmt`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 // cmd/dev-check/main_test.go
@@ -285,21 +285,21 @@ func TestValidateCommit(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test -v ./cmd/dev-check`
 Expected: FAIL with `validateBranch` and `validateCommit` undefined.
 
-- [ ] **Step 3: Implement minimal `cmd/dev-check` CLI**
+- [x] **Step 3: Implement minimal `cmd/dev-check` CLI**
 
 Implement `validateBranch`, `validateCommit`, `validatePRTitle`, and subcommands dispatch in `cmd/dev-check/main.go`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test -v ./cmd/dev-check -count=1`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add cmd/dev-check/
@@ -318,19 +318,19 @@ git commit -m "feat(cli): add native dev-check for commit and branch validation"
 **Interfaces:**
 - Produces: `dev-check release-config` verification command, Release Please configuration files.
 
-- [ ] **Step 1: Write failing test for release config validation**
+- [x] **Step 1: Write failing test for release config validation**
 
 In `cmd/dev-check/release_test.go`, test that `dev-check release-config` validates:
 - `release-please-config.json` contains package `.` with `initial-version: "0.1.0"`.
 - `.release-please-manifest.json` contains `".": "0.1.0"`.
 - `CHANGELOG.md` exists and contains initial header.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test -v ./cmd/dev-check -run TestReleaseConfig`
 Expected: FAIL (files missing).
 
-- [ ] **Step 3: Create Release Please configuration files**
+- [x] **Step 3: Create Release Please configuration files**
 
 Create:
 - `release-please-config.json`
@@ -338,12 +338,12 @@ Create:
 - `CHANGELOG.md`
 - Implement `validateReleaseConfig` in `cmd/dev-check/main.go`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test -v ./cmd/dev-check -run TestReleaseConfig -count=1`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add release-please-config.json .release-please-manifest.json CHANGELOG.md cmd/dev-check/
@@ -361,16 +361,16 @@ git commit -m "build(release): configure release-please and initial release boot
 **Interfaces:**
 - Produces: GitHub Actions CI pipeline running `standards`, `go-quality`, `security`, and `docker-validation`.
 
-- [ ] **Step 1: Write workflow syntax and structure test**
+- [x] **Step 1: Write workflow syntax and structure test**
 
 Write a test checking that `.github/workflows/ci.yml` is valid YAML, specifies top-level `permissions: contents: read`, includes timeout on all jobs, pins actions with commit hashes, and contains required jobs (`standards`, `go-quality`, `security`, `docker-validation`).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test -v ./deployments/docker -run TestCIWorkflow`
 Expected: FAIL (.github/workflows/ci.yml not found).
 
-- [ ] **Step 3: Implement `.github/workflows/ci.yml`**
+- [x] **Step 3: Implement `.github/workflows/ci.yml`**
 
 Include:
 - Triggers: `pull_request` to `main`, `push` to `main`, `workflow_dispatch`.
@@ -380,12 +380,12 @@ Include:
 - Job `security`: `govulncheck`, `gitleaks`, dependency-review.
 - Job `docker-validation`: build container, scan with Trivy (failing on CRITICAL), run smoke tests (`/health/ready`, `version` CLI).
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test -v ./deployments/docker -run TestCIWorkflow -count=1`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add .github/workflows/ci.yml deployments/docker/ci_workflow_test.go
@@ -403,16 +403,16 @@ git commit -m "ci(actions): add comprehensive CI pipeline with quality and secur
 **Interfaces:**
 - Produces: Self-contained release workflow triggering Release Please and publishing GHCR images + binary assets + SBOM + provenance.
 
-- [ ] **Step 1: Write workflow structure test**
+- [x] **Step 1: Write workflow structure test**
 
 Test that `.github/workflows/release.yml` defines `release-please`, `verify-release-commit`, `publish-ghcr`, and `publish-release-assets`, requires commit SHA verification, configures multi-arch `linux/amd64,linux/arm64`, and supports `workflow_dispatch` recovery.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test -v ./deployments/docker -run TestReleaseWorkflow`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement `.github/workflows/release.yml`**
+- [x] **Step 3: Implement `.github/workflows/release.yml`**
 
 Include:
 - `release-please` job running `googleapis/release-please-action` with `secrets.GITHUB_TOKEN`.
@@ -421,12 +421,12 @@ Include:
 - `publish-release-assets` job cross-compiling static binaries and uploading tarballs + checksums to GitHub Release.
 - Idempotency guards checking for existing immutable tags before publishing.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test -v ./deployments/docker -run TestReleaseWorkflow -count=1`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add .github/workflows/release.yml deployments/docker/release_workflow_test.go
@@ -444,16 +444,16 @@ git commit -m "ci(release): add self-contained release and publishing workflow w
 **Interfaces:**
 - Produces: Standard developer targets `make check`, `make ci`, `make version`, `make release-check`, Dependabot updates, and repository guidelines.
 
-- [ ] **Step 1: Write tests for developer commands**
+- [x] **Step 1: Write tests for developer commands**
 
 In `cmd/dev-check/main_test.go` and Makefile checks, test that `make version` outputs valid version info and `make check` executes without error.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `make version` / `make check`
 Expected: FAIL (targets not yet in Makefile).
 
-- [ ] **Step 3: Implement repository metadata and Makefile targets**
+- [x] **Step 3: Implement repository metadata and Makefile targets**
 
 - Create `.editorconfig` (2 spaces YAML/MD, tabs Go, UTF-8, LF).
 - Create `.gitattributes` (LF text, binary SQLite/media).
@@ -463,12 +463,12 @@ Expected: FAIL (targets not yet in Makefile).
 - Create `CONTRIBUTING.md` and `SECURITY.md`.
 - Update `Makefile` with `check`, `ci`, `version`, `release-check`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `make version && make check`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add .editorconfig .gitattributes .github/ CONTRIBUTING.md SECURITY.md Makefile
@@ -486,15 +486,15 @@ git commit -m "chore(repo): add repository standards, dependabot, and developer 
 **Interfaces:**
 - Produces: Complete architectural CI/CD runbook, ruleset configuration guide, rollback manual, updated README, and verification ledger.
 
-- [ ] **Step 1: Check spec coverage and write `docs/ci-cd.md`**
+- [x] **Step 1: Check spec coverage and write `docs/ci-cd.md`**
 
 Document branch strategy, Conventional Commits, SemVer policy, Release Please workflow, manual PR check approval, release failure recovery, GHCR image tags, GitHub Rulesets setup, and rollback instructions.
 
-- [ ] **Step 2: Update system documentation**
+- [x] **Step 2: Update system documentation**
 
 Update `README.md`, `docs/architecture.md`, and `docs/observability.md` to reflect version metadata, CI/CD pipelines, and OpenTelemetry `service.version`.
 
-- [ ] **Step 3: Run the complete verification set**
+- [x] **Step 3: Run the complete verification set**
 
 Execute:
 - `go test ./...`
@@ -511,7 +511,7 @@ Execute:
 - Test container startup and health probe.
 - Update `docs/validation.md` with all executed commands, outcomes, and unperformed remote limits.
 
-- [ ] **Step 4: Commit documentation**
+- [x] **Step 4: Commit documentation**
 
 ```bash
 git add docs/ README.md

@@ -184,3 +184,28 @@ Embedded migrations initialize the application schema; WAL, foreign keys, full s
 - **WhatsApp Outbox**: Rate limits or server cooldowns pause channel delivery while preserving pending rows. Authentication revocation marks channel state as requiring authentication.
 - **Channel Isolation**: Telegram and WhatsApp workers run independently. A stall, rate limit, or failure on one channel has zero effect on the other channel or on polling.
 - **At-Least-Once Delivery**: Network delivery followed by process crash before database acknowledgement can produce duplicate notifications. Idempotent request IDs and presentation deduplication mitigate transport-level duplication.
+
+## Version introspection and platform metadata
+
+The `internal/platform/version` package centralizes build metadata and runtime introspection for the service:
+- **Build Linker Flags**: Injected via `-ldflags` during compilation (`Version`, `Commit`, `Date`).
+- **Runtime Discovery**: Falls back gracefully to `runtime/debug.ReadBuildInfo` and `runtime` platform introspection when running unlinked development binaries (`dev` or `dev+<commit>`).
+- **CLI Subcommand**: Accessible via `election-bot version` (human-readable) and `election-bot version --json` (machine-readable structured JSON).
+- **System Telemetry**: Injected automatically into OpenTelemetry `service.version` resource attributes and structured startup logs (`lifecycle/run.go`).
+
+## Developer tooling and repository checks
+
+The `cmd/dev-check` utility is a zero-dependency, compiled Go CLI tool that enforces development standards without Node.js or external tool dependencies:
+- **`dev-check branch`**: Enforces strict branch naming (`<type>/<description>`) according to conventional categories (`feat/`, `fix/`, `ci/`, etc.).
+- **`dev-check commit`**: Validates Conventional Commits 1.0.0 compliance on commit headers, bodies, breaking change footers, and PR titles.
+- **`dev-check release-config`**: Validates consistency between `release-please-config.json` and `.release-please-manifest.json`, verifying the initial bootstrap version (`v0.1.0`).
+
+## CI/CD and automated delivery architecture
+
+Continuous integration and continuous delivery are orchestrated via GitHub Actions workflows:
+- **CI Pipeline (`.github/workflows/ci.yml`)**: Implements four mandatory status gates: `standards` (dev-check validation), `go-quality` (tests, race, lint, simulation, static compilation), `security` (govulncheck, gitleaks, dependency review), and `docker-validation` (Trivy container scanning, multi-arch buildability, non-root smoke test).
+- **CD Pipeline (`.github/workflows/release.yml`)**: Automated via Release Please using standard `GITHUB_TOKEN`:
+  - Enforces exact commit verification: confirms the exact release commit SHA passed all mandatory CI checks before triggering artifact publication.
+  - Multi-architecture container images (`linux/amd64`, `linux/arm64`) are built and published to `ghcr.io/diaszano/election-bot` with immutable SemVer tags (`v0.1.0`, `0.1.0`), minor series aliases (`0.1`), SPDX JSON SBOMs, and cryptographic build provenance attestations.
+  - Cross-compiles static binaries and attaches tarballs with SHA-256 checksums to the GitHub Release.
+  - Detailed operational procedures, GitHub ruleset configuration, and rollback instructions are maintained in [CI/CD documentation](ci-cd.md).
