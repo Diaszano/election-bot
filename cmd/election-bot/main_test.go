@@ -40,4 +40,3 @@ func TestCLIVersion(t *testing.T) {
 		t.Fatalf("expected handled=false for non-version command")
 	}
 }
-

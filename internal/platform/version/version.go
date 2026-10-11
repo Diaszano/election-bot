@@ -31,7 +31,7 @@ func Get() Info {
 	c := Commit
 	d := Date
 
-	if (c == "none" || d == "unknown") {
+	if c == "none" || d == "unknown" {
 		if bi, ok := debug.ReadBuildInfo(); ok {
 			for _, setting := range bi.Settings {
 				switch setting.Key {
