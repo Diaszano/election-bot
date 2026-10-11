@@ -2,7 +2,7 @@ package integration
 
 import (
 	"bytes"
-	"net"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,11 +21,19 @@ func TestExecutableSIGTERMAndUnavailableTelemetry(t *testing.T) {
 	}
 	var addr string
 	for attempt := 0; attempt < 10; attempt++ {
-		l, e := net.Listen("tcp", "127.0.0.1:0")
-		if e == nil {
-			addr = l.Addr().String()
-			_ = l.Close()
-			break
+		fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+		if err == nil {
+			err = syscall.Bind(fd, &syscall.SockaddrInet4{Port: 0, Addr: [4]byte{127, 0, 0, 1}})
+			if err == nil {
+				sa, err := syscall.Getsockname(fd)
+				if err == nil {
+					port := sa.(*syscall.SockaddrInet4).Port
+					addr = fmt.Sprintf("127.0.0.1:%d", port)
+					_ = syscall.Close(fd)
+					break
+				}
+			}
+			_ = syscall.Close(fd)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
