@@ -34,7 +34,7 @@ jobs:
           cache: true
 
       - name: Validate branch naming convention
-        run: go run ./cmd/dev-check branch
+        run: go run ./cmd/dev-check branch "${{ github.head_ref || github.ref_name }}"
 
       - name: Validate PR title convention
         if: github.event_name == 'pull_request'
@@ -98,13 +98,13 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
-          go-version: '1.27.0'
+          go-version: '1.27.2'
           cache: true
 
       - name: Run govulncheck
         uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1.0.4
         with:
-          go-version-input: '1.27.0'
+          go-version-input: '1.27.2'
           go-package: ./...
 
       - name: Run gitleaks secret detection
