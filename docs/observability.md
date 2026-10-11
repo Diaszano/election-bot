@@ -2,7 +2,7 @@
 
 The official OTel SDKs export traces, metrics and logs over OTLP gRPC. JSON slog also writes stdout; otelslog exports log records with native context correlation and explicit `trace_id`/`span_id` attributes. DEBUG/INFO/WARN/ERROR are supported. Meaningful accepted changes emit INFO; unchanged results do not. Export errors use the JSON handler directly to avoid recursively exporting an exporter-failure log.
 
-Resource attributes: `service.name=election-bot`, `service.namespace=elections`, `service.version=dev`, `deployment.environment=<APP_ENV>`. TSE HTTP contexts propagate W3C TraceContext. Telegram uses sanitized logical spans (`telegram.send_message`, `telegram.edit_message`, command API calls), avoiding raw token-bearing HTTP URLs. No chat IDs, message IDs, source candidate names, private contents or credentials are signal labels/attributes.
+Resource attributes: `service.name=election-bot`, `service.namespace=elections`, `service.version=<version>` (dynamically provided by `internal/platform/version.Get().Version`, e.g. `v0.1.0` in release builds, or `dev` / `dev+<commit>` in local development), `deployment.environment=<APP_ENV>`. TSE HTTP contexts propagate W3C TraceContext. Telegram uses sanitized logical spans (`telegram.send_message`, `telegram.edit_message`, command API calls), avoiding raw token-bearing HTTP URLs. No chat IDs, message IDs, source candidate names, private contents or credentials are signal labels/attributes.
 
 ## Traces and sampling
 

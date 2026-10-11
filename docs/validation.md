@@ -1,6 +1,6 @@
 # Verification ledger
 
-Date: 2026-10-10 / 2026-10-11. Implementation branches: `feat/election-bot` (Telegram/core monolith) and `feat/whatsapp-integration` (WhatsApp channel extension). Architecture, specifications, and plans were approved before product implementation. Native execution used incremental commits and test-first package/regression checks.
+Date: 2026-10-10 / 2026-10-11. Implementation branches: `feat/election-bot` (Telegram/core monolith), `feat/whatsapp-integration` (WhatsApp channel extension), and `ci/github-actions-release-pipeline` (CI/CD, SemVer, Docker publishing, and repository standards). Architecture, specifications, and plans were approved before product implementation. Native execution used incremental commits and test-first package/regression checks.
 
 ## Executed evidence — Core monolith (`feat/election-bot`)
 
@@ -56,6 +56,34 @@ Date: 2026-10-10 / 2026-10-11. Implementation branches: `feat/election-bot` (Tel
 | **Live Grafana & OTel stack verification** | Observability stack started via Docker Compose; verified provisioning of `election-bot-overview` and `election-bot-telemetry` dashboards; verified that queries use actual exported metric names (`whatsapp_connection_state`, `whatsapp_messages_sent_total`, etc.). | PASS |
 | **Database migration & backup recovery** | Verified `migrateV2` on populated schema 1; verified row preservation, collision keys (`legacy:<id>`), foreign key integrity (`PRAGMA foreign_key_check`), rollback on injected failure (`TestMigrationFailureRollsBack`), and full restore from pre-migration backup (`TestMigrationBackupRestore`). `migrations/001_initial.sql` remains byte-for-byte identical. | PASS |
 
+## Executed evidence — CI/CD, SemVer, Docker Publishing, and Repository Standards (`ci/github-actions-release-pipeline`)
+
+| Task / Check | Executed verification & evidence | Result |
+|---|---|---|
+| **Task 1**: Version package & CLI introspection | Implemented `internal/platform/version`, `election-bot version`, and `election-bot version --json`. Injected `version.Get().Version` into OpenTelemetry `service.version` and startup logs. Commit `f53e65a`, `032dd1c`. | PASS |
+| **Task 2**: Native commit & branch validator | Implemented zero-dependency Go CLI `cmd/dev-check` for Conventional Commits 1.0.0 (`dev-check commit`), branch naming (`dev-check branch`), and PR titles (`dev-check pr-title`). Covered breaking changes (`!`, footer), pre-1.0 exemptions, and merge commit exemptions in `cmd/dev-check/main_test.go`. Commit `d4cbefe`. | PASS |
+| **Task 3**: Release Please configuration & bootstrap | Configured `release-please-config.json` (Go package `election-bot`, `initial-version: "0.1.0"`, `bump-minor-pre-major: true`), `.release-please-manifest.json` (`"0.1.0"`), and `CHANGELOG.md`. Added `dev-check release-config` validator with unit test in `cmd/dev-check/release_test.go`. Commit `bf89e43`. | PASS |
+| **Task 4**: GitHub Actions CI workflow | Implemented `.github/workflows/ci.yml` with four mandatory gates: `standards`, `go-quality`, `security` (govulncheck, gitleaks, dependency-review), and `docker-validation` (Buildx, Trivy scanner blocking on `CRITICAL`, non-root smoke test). Verified syntax and permissions in `deployments/docker/ci_workflow_test.go`. Commit `2f17782`. | PASS |
+| **Task 5**: Release & publishing workflow | Implemented `.github/workflows/release.yml` with self-contained Release Please (`GITHUB_TOKEN`), exact release commit SHA verification against all mandatory CI checks, multi-arch GHCR publishing (`linux/amd64`, `linux/arm64`), Trivy scan, SPDX SBOM, build provenance attestation, and binary asset cross-compilation. Verified in `deployments/docker/release_workflow_test.go`. Commit `d4e9463`. | PASS |
+| **Task 6**: Repository standards & developer tooling | Created `.editorconfig`, `.gitattributes`, `.github/CODEOWNERS`, `.github/dependabot.yml` (weekly gomod/actions/docker with `chore(deps)` prefix), issue and PR templates, `CONTRIBUTING.md`, `SECURITY.md`, and updated `Makefile` (`check`, `ci`, `version`, `release-check`, `git-hooks`). Commit `66fd17f`, `07d80f6`. | PASS |
+| **Release Safety**: Pre-tag verification gate | Verified that `verify-release-commit` executes before `release-please` (`needs: verify-release-commit`). All 4 CI gates must pass before Release Please can create any Git tag or GitHub Release. | PASS |
+| **Release Safety**: Trivy vulnerability gate | Confirmed that `aquasecurity/trivy-action` executes with `severity: CRITICAL` and `exit-code: '1'` before `push: true`. Any critical vulnerability blocks publication. | PASS |
+| **Release Safety**: Initial release bootstrap | Confirmed initial release calculation produces strictly `v0.1.0` via `cmd/dev-check release-config` and `release_test.go`. | PASS |
+| **Release Safety**: SHA alignment across artifacts | Verified that Docker images, static binaries, SBOMs, provenance attestations, and OCI labels all resolve and reference the exact same immutable release commit SHA (`TARGET_SHA`). | PASS |
+| **Release Safety**: Immutability & recovery security | Verified that manual recovery (`workflow_dispatch` with `recovery_tag`) enforces the same mandatory CI verification and security gates, and cannot overwrite immutable version tags. | PASS |
+| **Full test suite (`go test ./...`)** | All 22 packages with test suites passed without errors. | PASS |
+| **Race detector (`go test -race ./...`)** | Zero data races detected across all packages. | PASS |
+| **Static analysis (`go vet ./...`)** | Clean analysis across entire module. | PASS |
+| **Code linting (`make lint`)** | `golangci-lint run` (v2.13.2) reported 0 issues. | PASS |
+| **Repository checks (`make check`)** | Branch validation and release-config consistency verified: `ci/github-actions-release-pipeline` valid, manifest matches `0.1.0`. | PASS |
+| **Binary compilation (`make build`)** | `go build -trimpath -o bin/election-bot ./cmd/election-bot` built successfully. | PASS |
+| **Recovery simulation (`make simulate`)** | Deterministic simulation ran and passed (`election-bot simulation: PASS`). | PASS |
+| **Dependency verification (`go mod verify`)** | All dependencies matched pinned module hashes. | PASS |
+| **Static build with ldflags (`CGO_ENABLED=0 go build`)** | Pure-Go binary built with `-ldflags` injecting `Version=v0.1.0` and `Commit=testsha`. | PASS |
+| **CLI version introspection** | `./bin/election-bot version` returned `election-bot v0.1.0`, `Commit: testsha`, `Go: go1.27.0`, `Platform: linux/amd64`. `./bin/election-bot version --json` returned structured JSON with all fields populated. | PASS |
+| **Docker container build** | `docker build -t election-bot:test .` succeeded (15/15 stages finished). | PASS |
+| **Docker container smoke test** | Started `election-bot:test` with `DATA_SOURCE_MODE=simulation`; verified HTTP 200 on `/health/ready` and `/health/live`; verified CLI `version` and `version --json` inside container; verified clean SIGTERM shutdown and removal. | PASS |
+
 ## Integration boundary and limitations
 
 1. **No Real WhatsApp Account Pairing or Messaging**: No real WhatsApp phone number, credentials, or session keys were used during validation. All WhatsApp adapter behavior was validated against deterministic fake clients, simulated network connections, and offline session stores. whatsmeow is an unofficial WhatsApp Web client. Account restriction or suspension remains an inherent operational risk of automated messaging on WhatsApp, even at low volumes. The official WhatsApp Business Platform is the recommended long-term solution for official production messaging.
@@ -63,6 +91,9 @@ Date: 2026-10-10 / 2026-10-11. Implementation branches: `feat/election-bot` (Tel
 3. **Official TSE Runoff Contract**: Official mode remains fail-closed by design (`DATA_SOURCE_MODE=official` halts startup). TSE EA20 contract documentation returned HTTP 403, and national runoff winner confirmation fields remain unverified against official production APIs.
 4. **Schema Migration Integrity**: `migrations/001_initial.sql` was verified to be completely unmodified. Database migration from v1 to v2 is strictly non-destructive.
 5. **Privacy and Secret Scanning**: Scanned all tracked files, commit history, and staging. Zero tokens, passwords, real recipient phone numbers, private JIDs, QR codes, or encryption keys are present in repository files. Tracked `.env.example` contains only placeholder values.
+6. **No Remote GitHub Push or Live Actions Execution**: In accordance with the project safety boundary, no commits were pushed to remote GitHub, and no live GitHub Actions workflows were triggered on GitHub servers. All workflow files were validated locally using structural, syntax, and permission tests.
+7. **No Remote GHCR Container Publishing**: No container images were pushed to remote `ghcr.io/diaszano/election-bot`. Container builds, multi-platform compatibility, and smoke tests were executed locally.
+8. **No Remote Release or Tag Mutation**: No Git tags were pushed and no actual GitHub Releases were published. Release Please configuration was validated via dry-run and unit tests.
 
 ## Decisions and operational boundaries
 

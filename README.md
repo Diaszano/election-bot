@@ -29,7 +29,15 @@ Go 1.27.0; Docker Engine and Compose for the stack; Python 3 for its telemetry v
 make test
 make simulate
 make build
+./bin/election-bot version
 ./bin/election-bot
+```
+
+Inspect version and build metadata:
+
+```sh
+./bin/election-bot version
+./bin/election-bot version --json
 ```
 
 Defaults use fictional local simulation, disabled Telegram and disabled OTLP, with `data/elections.db`. This background simulation does not create a subscriber automatically. `make simulate` runs a finite recovery scenario with a recording sender and a temporary database. It never calls Telegram, even if Telegram is enabled in the environment. Both modes prominently label synthetic results.
@@ -111,10 +119,18 @@ See the complete [.env.example](.env.example). Duration values use Go syntax (`1
 
 ## Docker
 
+Pre-built multi-architecture container images (`linux/amd64`, `linux/arm64`) are published to the GitHub Container Registry at `ghcr.io/diaszano/election-bot`.
+
 ```sh
+# Inspect version on pre-built release container
+docker run --rm ghcr.io/diaszano/election-bot:v0.1.0 version
+
+# Or deploy locally via Docker Compose (builds from local Dockerfile)
 docker compose up -d --build
 curl -f http://127.0.0.1:8080/health/ready
 ```
+
+In production environments, deploying by immutable container image digest (e.g. `ghcr.io/diaszano/election-bot@sha256:<digest>`) or immutable SemVer tag (`ghcr.io/diaszano/election-bot:v0.1.0`) is strictly recommended over moving tags.
 
 For the full stack, configure `GRAFANA_ADMIN_PASSWORD` in `.env`, then:
 
@@ -198,7 +214,35 @@ make lint
 make simulate
 ```
 
+### Developer workflow and repository checks
+
+Local developer commands powered by `make` and the native `cmd/dev-check` CLI utility:
+
+- `make check`: Validates branch naming, Conventional Commits on the current branch, and Release Please configuration consistency.
+- `make ci`: Executes the complete local CI suite (`go mod verify`, `go vet`, `make lint`, `test-race`, `simulate`, and static build `CGO_ENABLED=0 go build`).
+- `make version`: Displays application version and build metadata via `./bin/election-bot version`.
+- `make release-check`: Performs dry-run validation of `release-please-config.json` and `.release-please-manifest.json`.
+- `make git-hooks`: Installs an optional local Git `commit-msg` hook to validate Conventional Commits automatically.
+
 Tests use temporary SQLite databases and fake HTTP/OTLP servers; no token or real Telegram or WhatsApp account is needed. The executable shutdown test builds the binary and tests SIGTERM while telemetry is unreachable. Supported Make targets are listed by `make help`. Current verification evidence is in [docs/validation.md](docs/validation.md).
+
+## CI/CD and release pipeline
+
+The project uses GitHub Actions for continuous integration and automated releases:
+
+- **Continuous Integration (`.github/workflows/ci.yml`)**: Triggered on all PRs targeting `main` and pushes to `main`. Enforces four mandatory status gates:
+  1. `standards`: Validates branch naming (`<type>/<description>`), Conventional Commits 1.0.0, PR titles, and Release Please configuration via native `cmd/dev-check`.
+  2. `go-quality`: Dependency verification (`go mod verify`), `go vet`, strict `golangci-lint 2.13.2`, unit tests, race detection (`-race`), offline simulation, and static pure-Go compilation.
+  3. `security`: Go vulnerability scanning (`govulncheck`), secret scanning (`gitleaks`), and PR dependency review.
+  4. `docker-validation`: Docker Buildx multi-arch build test, container filesystem vulnerability scan with Trivy (blocking on `CRITICAL`), non-root execution (UID 65532), and simulated health probe smoke test.
+- **Continuous Delivery & Releases (`.github/workflows/release.yml`)**: Automated via Release Please using standard `GITHUB_TOKEN`:
+  1. Opens and updates Release PRs with automated changelogs.
+  2. Verifies the exact release commit SHA passed all mandatory CI checks before publishing.
+  3. Scans container images with Trivy and publishes multi-arch images (`linux/amd64`, `linux/arm64`) to GitHub Container Registry (`ghcr.io/diaszano/election-bot`).
+  4. Generates SPDX JSON Software Bill of Materials (SBOM) and cryptographic build provenance attestations.
+  5. Cross-compiles static binaries and attaches checksummed archives to the GitHub Release.
+
+For comprehensive details on branching strategies, SemVer rules, recovery workflows, and operational rollbacks, see [CI/CD documentation](docs/ci-cd.md).
 
 ## Troubleshooting, recovery and security
 

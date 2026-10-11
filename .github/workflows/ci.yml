@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  standards:
+    name: Standards & Governance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version: '1.27.0'
+          cache: true
+
+      - name: Validate branch naming convention
+        run: go run ./cmd/dev-check branch
+
+      - name: Validate PR title convention
+        if: github.event_name == 'pull_request'
+        run: go run ./cmd/dev-check pr-title "${{ github.event.pull_request.title }}"
+
+      - name: Validate release configuration
+        run: go run ./cmd/dev-check release-config
+
+  go-quality:
+    name: Go Quality & Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version: '1.27.0'
+          cache: true
+
+      - name: Install pinned golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+
+      - name: Verify Go module dependencies
+        run: go mod verify
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        run: make lint
+
+      - name: Run unit tests
+        run: go test -count=1 ./...
+
+      - name: Run tests with race detector
+        run: go test -race ./...
+
+      - name: Run simulation verification
+        run: make simulate
+
+      - name: Verify static build compilation
+        run: CGO_ENABLED=0 go build -trimpath -o /dev/null ./cmd/election-bot
+
+  security:
+    name: Security & Vulnerability Scanning
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
+        with:
+          go-version: '1.27.0'
+          cache: true
+
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@b331f47137f8f83734661845cc877fa6992d9aa3 # v1.0.4
+        with:
+          go-version-input: '1.27.0'
+          go-package: ./...
+
+      - name: Run gitleaks secret detection
+        uses: gitleaks/gitleaks-action@f9076d2be247bf23703975ba6fe6e0362bc462b1 # v2.3.8
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@5a2ce3f5b92ee19cbb1541a4984c76d921601d7c # v4.3.4
+
+  docker-validation:
+    name: Docker Build & Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Build local container image
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: .
+          load: true
+          tags: election-bot:test
+          push: false
+
+      - name: Scan container image with Trivy
+        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0
+        with:
+          image-ref: election-bot:test
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL
+
+      - name: Run container smoke tests
+        run: |
+          # 1. Verify election-bot version CLI
+          docker run --rm election-bot:test version
+          docker run --rm election-bot:test version --json
+
+          # 2. Run container in simulation mode and verify non-root UID 65532
+          CID=$(docker run -d -p 8080:8080 -e DATA_SOURCE_MODE=simulation -e TELEGRAM_ENABLED=false -e WHATSAPP_ENABLED=false election-bot:test)
+          trap "docker rm -f $CID >/dev/null 2>&1 || true" EXIT
+
+          USER_ID=$(docker inspect --format='{{.Config.User}}' "$CID")
+          echo "Container user: $USER_ID"
+          if [ "$USER_ID" != "65532:65532" ] && [ "$USER_ID" != "65532" ]; then
+            echo "Expected non-root UID 65532, got: $USER_ID"
+            exit 1
+          fi
+
+          # 3. Verify /health/ready endpoint
+          READY=0
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/health/ready || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "Healthcheck /health/ready passed with status 200"
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "Readiness check failed"
+            docker logs "$CID"
+            exit 1
+          fi
+
+          docker rm -f "$CID" >/dev/null 2>&1
+          trap - EXIT

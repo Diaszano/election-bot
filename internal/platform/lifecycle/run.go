@@ -22,6 +22,7 @@ import (
 	"github.com/Diaszano/election-bot/internal/domain/subscription"
 	"github.com/Diaszano/election-bot/internal/platform/config"
 	"github.com/Diaszano/election-bot/internal/platform/observability"
+	"github.com/Diaszano/election-bot/internal/platform/version"
 	"net/http"
 	"sync"
 	"time"
@@ -30,7 +31,8 @@ import (
 func Run(parent context.Context, c config.Config) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	telemetry, e := observability.Setup(ctx, c, "dev")
+	vInfo := version.Get()
+	telemetry, e := observability.Setup(ctx, c, vInfo.Version)
 	if e != nil {
 		return e
 	}
@@ -230,7 +232,12 @@ func Run(parent context.Context, c config.Config) error {
 			cancel()
 		}
 	})
-	logger.Info("election-bot initialized", "source_mode", c.Mode, "telegram_enabled", c.TelegramEnabled)
+	logger.Info("election-bot initialized",
+		"version", vInfo.Version,
+		"commit", vInfo.Commit,
+		"source_mode", c.Mode,
+		"telegram_enabled", c.TelegramEnabled,
+	)
 	<-ctx.Done()
 	shutdown, stop := context.WithTimeout(context.Background(), c.ShutdownTimeout)
 	defer stop()

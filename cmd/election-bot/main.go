@@ -8,6 +8,7 @@ import (
 	"github.com/Diaszano/election-bot/internal/platform/config"
 	"github.com/Diaszano/election-bot/internal/platform/lifecycle"
 	"github.com/Diaszano/election-bot/internal/platform/observability"
+	"github.com/Diaszano/election-bot/internal/platform/version"
 	"github.com/mdp/qrterminal/v3"
 	"go.opentelemetry.io/otel"
 	"io"
@@ -21,6 +22,14 @@ import (
 )
 
 func main() {
+	if handled, out, err := dispatchVersion(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(out)
+		return
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	if handled, err := dispatchWhatsApp(ctx, os.Args[1:], runWhatsAppPair, runWhatsAppLogout); handled {
@@ -50,7 +59,7 @@ func main() {
 			if x != nil {
 				e = x
 			} else {
-				runtime, x := observability.Setup(ctx, c, "dev")
+				runtime, x := observability.Setup(ctx, c, version.Get().Version)
 				if x != nil {
 					e = x
 				} else {
@@ -81,6 +90,22 @@ func main() {
 		fmt.Fprintln(os.Stderr, e)
 		os.Exit(1)
 	}
+}
+
+func dispatchVersion(args []string) (bool, string, error) {
+	if len(args) == 0 || args[0] != "version" {
+		return false, "", nil
+	}
+	fs := flag.NewFlagSet("version", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print version details in JSON format")
+	if err := fs.Parse(args[1:]); err != nil {
+		return true, "", err
+	}
+	if *asJSON {
+		out, err := version.JSON()
+		return true, out, err
+	}
+	return true, version.String(), nil
 }
 
 func dispatchWhatsApp(ctx context.Context, args []string, pair, logout func(context.Context) error) (bool, error) {
