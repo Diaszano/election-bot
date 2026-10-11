@@ -6,3 +6,7 @@
 *.db-shm
 *.db-wal
 coverage.out
+
+# WhatsApp linked-device credentials
+whatsapp-session.db*
+*.session.lock
