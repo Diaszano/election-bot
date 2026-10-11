@@ -1,6 +1,6 @@
-.PHONY: help build run test test-race lint fmt docker-build docker-up docker-down docker-logs observability-up observability-down simulate clean check ci version release-check
+.PHONY: help build run test test-race lint fmt docker-build docker-up docker-down docker-logs observability-up observability-down simulate clean check ci version release-check git-hooks
 help:
-	@echo "build run test test-race lint fmt docker-build docker-up docker-down docker-logs observability-up observability-down simulate clean check ci version release-check"
+	@echo "build run test test-race lint fmt docker-build docker-up docker-down docker-logs observability-up observability-down simulate clean check ci version release-check git-hooks"
 build:
 	go build -trimpath -o bin/election-bot ./cmd/election-bot
 run:
@@ -45,3 +45,8 @@ version:
 	go run ./cmd/election-bot version
 release-check:
 	go run ./cmd/dev-check release-config
+git-hooks:
+	@mkdir -p .git/hooks
+	@printf '#!/bin/sh\nexec go run ./cmd/dev-check commit "$$1"\n' > .git/hooks/commit-msg
+	@chmod +x .git/hooks/commit-msg
+	@echo "Installed .git/hooks/commit-msg hook"

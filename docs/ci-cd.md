@@ -252,11 +252,10 @@ The `.github/workflows/release.yml` workflow exposes a manual recovery entrypoin
 
 1. Navigate to **Actions** -> **Release & Publish Artifacts** -> **Run workflow**.
 2. Supply recovery inputs:
-   - `release_version`: The target SemVer tag (e.g. `v0.1.0`).
-   - `release_sha`: The exact commit SHA associated with the release tag.
+   - `recovery_tag`: The existing target SemVer tag to re-publish or recover (e.g. `v0.1.0`).
 3. The workflow validates:
-   - The SHA matches the tag.
-   - Mandatory CI checks passed for that SHA.
+   - Resolves the exact commit SHA associated with `recovery_tag`.
+   - Verifies that mandatory CI checks passed for that SHA.
    - Missing assets (Docker images, binary tarballs, SBOMs, attestations) are built, verified, and uploaded.
 
 ---

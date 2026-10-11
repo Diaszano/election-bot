@@ -174,6 +174,7 @@ func TestRepoStandards(t *testing.T) {
 			"ci:",
 			"version:",
 			"release-check:",
+			"git-hooks:",
 		}
 
 		for _, target := range requiredTargets {
