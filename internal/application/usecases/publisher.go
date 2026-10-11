@@ -73,10 +73,15 @@ func (p *Publisher) Publish(ctx context.Context) (err error) {
 		}
 	}
 	now := p.clock.Now()
-	if channelState.AuthenticationRequired || channelState.PausedUntil.After(now) || channelState.GlobalNextSendAt.After(now) {
+	whatsappNotConnected := p.channel == subscription.WhatsApp && channelState.PauseReason != "" && channelState.PauseReason != "connected"
+	if channelState.AuthenticationRequired || whatsappNotConnected || channelState.PausedUntil.After(now) || channelState.GlobalNextSendAt.After(now) {
 		due := latestFuture(now, channelState.PausedUntil, channelState.GlobalNextSendAt)
 		if due.IsZero() {
-			due = now.Add(time.Minute)
+			delay := time.Minute
+			if whatsappNotConnected && !channelState.AuthenticationRequired {
+				delay = time.Second
+			}
+			due = now.Add(delay)
 		}
 		for _, job := range jobs {
 			if err = p.store.DeferDelivery(ctx, job, due); err != nil {
@@ -170,9 +175,19 @@ func (p *Publisher) deliver(ctx context.Context, job notification.Delivery, oper
 		var api *ports.ExternalError
 		if errors.As(err, &api) && api.Kind == "missing_message" && operation == notification.Edit {
 			if p.channel == subscription.WhatsApp {
-				if e := p.store.DisableEditing(ctx, job, p.clock.Now(), "missing_message"); e != nil {
+				due := job.MainState.LastSummaryAt.Add(p.policy.Digest)
+				if job.MainState.LastSummaryAt.IsZero() {
+					due = job.MainState.Ref.OriginalSentAt.Add(p.policy.Digest)
+				}
+				now := p.clock.Now()
+				due = latestFuture(now, due, job.MainState.LastActivityAt.Add(p.policy.RecipientMin))
+				if due.IsZero() {
+					due = now
+				}
+				if e := p.store.DisableEditing(ctx, job, due, "missing_message"); e != nil {
 					return e
 				}
+				return nil
 			}
 			attempt, err = p.prepare(ctx, job, notification.Send)
 			if err == nil {

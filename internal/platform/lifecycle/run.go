@@ -3,16 +3,22 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"github.com/Diaszano/election-bot/internal/adapters/inbound/health"
 	"github.com/Diaszano/election-bot/internal/adapters/inbound/scheduler"
 	commands "github.com/Diaszano/election-bot/internal/adapters/inbound/telegram"
+	waCommands "github.com/Diaszano/election-bot/internal/adapters/inbound/whatsapp"
 	"github.com/Diaszano/election-bot/internal/adapters/outbound/simulation"
 	"github.com/Diaszano/election-bot/internal/adapters/outbound/sqlite"
 	telegramapi "github.com/Diaszano/election-bot/internal/adapters/outbound/telegram"
+	waadapter "github.com/Diaszano/election-bot/internal/adapters/outbound/whatsapp"
 	"github.com/Diaszano/election-bot/internal/application/ports"
 	"github.com/Diaszano/election-bot/internal/application/usecases"
 	"github.com/Diaszano/election-bot/internal/domain/election"
+	"github.com/Diaszano/election-bot/internal/domain/notification"
+	"github.com/Diaszano/election-bot/internal/domain/subscription"
 	"github.com/Diaszano/election-bot/internal/platform/config"
 	"github.com/Diaszano/election-bot/internal/platform/observability"
 	"net/http"
@@ -74,7 +80,7 @@ func Run(parent context.Context, c config.Config) error {
 		username = identity.Username
 		sender = api
 	}
-	settings := usecases.Settings{Location: c.Location, PollInterval: c.PollInterval, BeforeInterval: c.BeforeInterval, FinalInterval: c.FinalInterval, StaleAfter: c.StaleAfter, DelayedAfter: c.DelayedAfter, CountingStart: c.CountingStart}
+	settings := usecases.Settings{Location: c.Location, PollInterval: c.PollInterval, BeforeInterval: c.BeforeInterval, FinalInterval: c.FinalInterval, StaleAfter: c.StaleAfter, DelayedAfter: c.DelayedAfter, CountingStart: c.CountingStart, SourceMode: c.Mode, AllowedWhatsAppRecipients: c.WhatsAppAllowedRecipients}
 	if c.Mode == "simulation" {
 		settings.CountingStart = time.Time{}
 	}
@@ -83,9 +89,84 @@ func Run(parent context.Context, c config.Config) error {
 	start := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
 	start(func() { scheduler.Run(ctx, time.Second, "election.poll", logger, svc.PollElectionResults) })
 	if c.TelegramEnabled {
+		publisher := usecases.NewPublisher(subscription.Telegram, db, telegramapi.NewChannelSender(api), ports.RealClock{}, notification.Policy{})
 		start(func() {
-			scheduler.Run(ctx, c.NotificationInterval, "notifications.publish", logger, svc.PublishResultUpdates)
+			scheduler.Run(ctx, c.NotificationInterval, "notifications.publish.telegram", logger, func(ctx context.Context) error { return publisher.Publish(ctx) })
 		})
+	}
+	var waClient *waadapter.Client
+	if c.WhatsAppEnabled {
+		if e = svc.ReconcileAllowedRecipients(ctx, c.WhatsAppAllowedRecipients); e != nil {
+			logger.Warn("WhatsApp recipient reconciliation failed", "reason", "store_unavailable")
+		} else if session, openErr := waadapter.OpenSession(ctx, c.WhatsAppSessionDB); openErr != nil {
+			logger.Warn("WhatsApp session unavailable; delivery suspended", "reason", "session_unavailable")
+		} else {
+			waClient = waadapter.NewClient(session, c.HTTPTimeout)
+			accountReady := false
+			state, stateErr := db.ReadChannelState(ctx, subscription.WhatsApp)
+			if stateErr == nil && !waClient.Paired() {
+				state.AuthenticationRequired = true
+				state.PauseReason = "not_paired"
+				stateErr = db.SaveChannelState(ctx, subscription.WhatsApp, state)
+			} else if stateErr == nil && waClient.Paired() {
+				digest := sha256.Sum256([]byte(session.Device().GetJID().String()))
+				accountReady = state.AccountBinding != "" && state.AccountBinding == hex.EncodeToString(digest[:]) && !state.AuthenticationRequired
+				if !accountReady {
+					state.AuthenticationRequired = true
+					if state.AccountBinding == "" {
+						state.PauseReason = "account_unbound"
+					} else if state.AccountBinding != hex.EncodeToString(digest[:]) {
+						state.PauseReason = "account_changed"
+					} else if state.PauseReason == "" {
+						state.PauseReason = "authentication_required"
+					}
+				} else {
+					state.PauseReason = "connecting"
+				}
+				stateErr = db.SaveChannelState(ctx, subscription.WhatsApp, state)
+			}
+			if stateErr != nil {
+				logger.Warn("WhatsApp state unavailable; delivery suspended", "reason", "state_store_unavailable")
+				_ = waClient.Close()
+				waClient = nil
+			} else {
+				waPublisher := usecases.NewPublisher(subscription.WhatsApp, db, waClient, ports.RealClock{}, notification.Policy{EditMin: c.WhatsAppEditMinInterval, Digest: c.WhatsAppDigestInterval, RecipientMin: c.WhatsAppRecipientMinInterval, GlobalMin: time.Second})
+				start(func() {
+					scheduler.Run(ctx, c.NotificationInterval, "notifications.publish.whatsapp", logger, func(ctx context.Context) error { return waPublisher.Publish(ctx) })
+				})
+				manager := waadapter.NewConnectionManager(waClient, db, time.Now, waadapter.ConnectionSettings{Enabled: true, ReconnectEnabled: c.WhatsAppReconnectEnabled, ConnectTimeout: c.WhatsAppConnectTimeout}, nil)
+				start(func() {
+					if err := manager.Run(ctx); err != nil && ctx.Err() == nil {
+						logger.Warn("WhatsApp connection manager stopped", "reason", "connection_unavailable")
+					}
+				})
+				if accountReady {
+					resolver := waadapter.NewIdentityResolver(session.Device(), election.Identity{Year: 2026, Round: 2, Code: "6258", Scope: "br", Office: 1})
+					allowed := make([]string, 0, len(c.WhatsAppAllowedRecipients))
+					for _, identity := range c.WhatsAppAllowedRecipients {
+						allowed = append(allowed, identity.Recipient)
+					}
+					handler := waCommands.NewHandler(svc, resolver, allowed, logger)
+					start(func() {
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case message := <-waClient.Messages():
+								if err := handler.Handle(ctx, message); err != nil {
+									logger.WarnContext(ctx, "WhatsApp command was not processed", "reason", "command_processing_failed")
+								}
+							}
+						}
+					})
+				}
+				defer func() {
+					if err := waClient.Close(); err != nil {
+						logger.Warn("WhatsApp session close incomplete", "reason", "session_close_failed")
+					}
+				}()
+			}
+		}
 	}
 	if api != nil {
 		h := commands.New(svc, sender, c.Location, username, c.Mode)

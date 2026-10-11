@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestWhatsAppMainPolicy(t *testing.T) {
+func TestEditWindowThenDigest(t *testing.T) {
 	now := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
 	policy := Policy{EditMin: time.Minute, Digest: 15 * time.Minute, RecipientMin: 3 * time.Second, GlobalMin: time.Second}
 	if got := DecideMain(now, MainState{}, "s1", "p1", policy); got.Operation != Send {
@@ -22,7 +22,7 @@ func TestWhatsAppMainPolicy(t *testing.T) {
 	}
 }
 
-func TestEditAcceptedDigestDedup(t *testing.T) {
+func TestDigestAfterAcceptedEditIsSuppressed(t *testing.T) {
 	now := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
 	state := MainState{Ref: MessageRef{ID: "remote-1", OriginalSentAt: now.Add(-20 * time.Minute)}, AcceptedSemanticRevision: "same-results", AcceptedPresentationRevision: "p-fresh"}
 	got := DecideMain(now, state, "same-results", "p-fresh", Policy{EditMin: time.Minute, Digest: 15 * time.Minute})

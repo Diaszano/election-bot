@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,16 +33,25 @@ func (s *attemptStore) PrepareAttempt(ctx context.Context, d notification.Delive
 	return a, e
 }
 func (s *attemptStore) count() int { s.mu.Lock(); defer s.mu.Unlock(); return s.prepared }
+func (s *attemptStore) ReadChannelState(ctx context.Context, channel subscription.Channel) (notification.ChannelState, error) {
+	return s.ChannelDeliveries.(ports.ChannelStateStore).ReadChannelState(ctx, channel)
+}
+func (s *attemptStore) SaveChannelState(ctx context.Context, channel subscription.Channel, state notification.ChannelState) error {
+	return s.ChannelDeliveries.(ports.ChannelStateStore).SaveChannelState(ctx, channel, state)
+}
 
 type testChannelSender struct {
-	mu                      sync.Mutex
-	active, maxActive, sent int
-	started                 chan struct{}
-	block                   <-chan struct{}
-	fail                    error
-	store                   *attemptStore
-	clock                   ports.Clock
-	onNetwork               func(context.Context) error
+	mu                        sync.Mutex
+	active, maxActive, sent   int
+	sendCalls, editCalls      int
+	mainSends, milestoneSends int
+	started                   chan struct{}
+	block                     <-chan struct{}
+	fail                      error
+	failEdit                  error
+	store                     *attemptStore
+	clock                     ports.Clock
+	onNetwork                 func(context.Context) error
 }
 
 func (s *testChannelSender) enter(ctx context.Context, a notification.Attempt) (notification.Acceptance, error) {
@@ -91,10 +101,26 @@ func (s *testChannelSender) enter(ctx context.Context, a notification.Attempt) (
 	return notification.Acceptance{Operation: a.Operation, AcceptedAt: now, Ref: notification.MessageRef{ID: fmt.Sprint(n), OriginalSentAt: now}}, nil
 }
 func (s *testChannelSender) Send(ctx context.Context, _ string, a notification.Attempt) (notification.Acceptance, error) {
+	s.mu.Lock()
+	s.sendCalls++
+	if strings.Contains(a.Text, "Eleições Presidenciais 2026") {
+		s.mainSends++
+	}
+	if strings.Contains(a.Text, "Marco de ") {
+		s.milestoneSends++
+	}
+	s.mu.Unlock()
 	return s.enter(ctx, a)
 }
 func (s *testChannelSender) Edit(ctx context.Context, _ string, _ notification.MessageRef, a notification.Attempt) (notification.Acceptance, error) {
-	return s.enter(ctx, a)
+	s.mu.Lock()
+	s.editCalls++
+	s.mu.Unlock()
+	accepted, err := s.enter(ctx, a)
+	if err == nil && s.failEdit != nil {
+		return notification.Acceptance{}, s.failEdit
+	}
+	return accepted, err
 }
 
 func publisherFixture(t *testing.T, c *clock, channel subscription.Channel, fake *testChannelSender, opts ...PublisherOption) (*Publisher, *sqlite.Store, subscription.Identity) {
@@ -287,5 +313,124 @@ func TestNewRevisionAfterAmbiguousAttempt(t *testing.T) {
 	}
 	if fake.store.count() < 2 {
 		t.Fatal("new revision did not prepare durable attempts")
+	}
+}
+
+func TestCoalescingKeepsRetryDeadlines(t *testing.T) {
+	ctx := context.Background()
+	c := &clock{time.Date(2026, 10, 25, 20, 25, 0, 0, time.UTC)}
+	fakeSender := &testChannelSender{fail: &ports.ExternalError{Kind: "transient"}}
+	p, db, identity := publisherFixture(t, c, subscription.WhatsApp, fakeSender)
+	if err := p.Publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := db.PendingChannel(ctx, subscription.WhatsApp, c.Now().Add(time.Hour), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before *notification.Delivery
+	for i := range jobs {
+		if jobs[i].Kind == "main" {
+			before = &jobs[i]
+			break
+		}
+	}
+	if before == nil || before.Attempts == 0 {
+		t.Fatal("main delivery was not durably scheduled for retry")
+	}
+	newSnapshot := simulation.Snapshot(50)
+	newSnapshot.Published = before.Due.Add(time.Minute)
+	newSnapshot.Generated = newSnapshot.Published
+	if err = New(db, db, simulation.New(), &sender{}, c, Settings{Election: identity.Election, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour, AllowedWhatsAppRecipients: []subscription.Identity{identity}}).ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &newSnapshot}); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = db.PendingChannel(ctx, subscription.WhatsApp, c.Now().Add(time.Hour), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, after := range jobs {
+		if after.Kind == "main" {
+			if after.Revision == before.Revision || !after.Due.Equal(before.Due) || after.Attempts != before.Attempts {
+				t.Fatalf("coalescing changed retry state: before=%+v after=%+v", before, after)
+			}
+			return
+		}
+	}
+	t.Fatal("coalescing discarded pending main work")
+}
+
+func TestEditFailureFallbackVisible(t *testing.T) {
+	ctx := context.Background()
+	c := &clock{time.Date(2026, 10, 25, 20, 25, 0, 0, time.UTC)}
+	fakeSender := &testChannelSender{}
+	p, db, _ := publisherFixture(t, c, subscription.WhatsApp, fakeSender)
+	if err := p.Publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p.policy = notification.Policy{EditMin: time.Minute, Digest: 15 * time.Minute, RecipientMin: 3 * time.Second, GlobalMin: time.Second}
+	c.t = c.t.Add(time.Minute)
+	snapshot := simulation.Snapshot(50)
+	snapshot.ID = "edit-failure-revision"
+	snapshot.Published = c.Now()
+	snapshot.Generated = c.Now()
+	if err := New(db, db, simulation.New(), &sender{}, c, Settings{Election: testElection, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour, AllowedWhatsAppRecipients: []subscription.Identity{{Election: testElection, Channel: subscription.WhatsApp, Recipient: "5511999999999@s.whatsapp.net"}}}).ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	fakeSender.failEdit = &ports.ExternalError{Kind: "missing_message"}
+	if err := p.Publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fakeSender.mainSends != 1 || fakeSender.editCalls != 1 {
+		t.Fatalf("fallback sent before digest deadline: main sends=%d edits=%d", fakeSender.mainSends, fakeSender.editCalls)
+	}
+	jobs, err := db.PendingChannel(ctx, subscription.WhatsApp, c.Now().Add(time.Hour), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var main *notification.Delivery
+	for i := range jobs {
+		if jobs[i].Kind == "main" {
+			main = &jobs[i]
+			break
+		}
+	}
+	if main == nil {
+		t.Fatal("pending main summary was discarded")
+	}
+	if !main.MainState.EditUnavailable || main.Due.Before(main.MainState.LastSummaryAt.Add(15*time.Minute)) {
+		t.Fatalf("fallback state: edit_unavailable=%t due=%s summary=%s now=%s", main.MainState.EditUnavailable, main.Due.Format(time.RFC3339), main.MainState.LastSummaryAt.Format(time.RFC3339), c.Now().Format(time.RFC3339))
+	}
+}
+
+func TestMilestonesBypassDigestNotPacing(t *testing.T) {
+	ctx := context.Background()
+	c := &clock{time.Date(2026, 10, 25, 20, 25, 0, 0, time.UTC)}
+	fakeSender := &testChannelSender{}
+	p, db, identity := publisherFixture(t, c, subscription.WhatsApp, fakeSender)
+	if err := p.Publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p.policy = notification.Policy{EditMin: time.Minute, Digest: 15 * time.Minute, RecipientMin: 3 * time.Second, GlobalMin: time.Second}
+	c.t = c.t.Add(14 * time.Minute)
+	snapshot := simulation.Snapshot(50)
+	snapshot.Published, snapshot.Generated = c.Now(), c.Now()
+	if err := New(db, db, simulation.New(), &sender{}, c, Settings{Election: identity.Election, Location: time.UTC, StaleAfter: time.Hour, DelayedAfter: time.Hour, AllowedWhatsAppRecipients: []subscription.Identity{identity}}).ProcessElectionSnapshot(ctx, ports.FetchResult{Snapshot: &snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveChannelState(ctx, subscription.WhatsApp, notification.ChannelState{GlobalNextSendAt: c.Now().Add(10 * time.Second), PauseReason: "connected"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fakeSender.mainSends != 1 || fakeSender.milestoneSends != 1 {
+		t.Fatalf("milestone bypassed global pacing: main=%d milestone=%d", fakeSender.mainSends, fakeSender.milestoneSends)
+	}
+	c.t = c.t.Add(10 * time.Second)
+	if err := p.Publish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fakeSender.mainSends != 1 || fakeSender.milestoneSends != 2 {
+		t.Fatalf("milestone did not bypass digest deadline: main=%d milestone=%d", fakeSender.mainSends, fakeSender.milestoneSends)
 	}
 }
