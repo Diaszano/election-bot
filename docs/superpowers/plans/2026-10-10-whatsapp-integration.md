@@ -10,7 +10,7 @@
 
 **Spec:** [Approved specification with final refinements](../specs/2026-10-10-whatsapp-integration-design.md).
 
-**Status:** Proposed plan for review. No task below has been executed; no feature dependencies have been installed. The specification refinement commit is `fe778c3`. All commands and expected results below are future verification instructions, not claims of completed checks.
+**Status:** Proposed plan for review. No task below has been executed; no feature dependencies have been installed. The specification refinement commits are `fe778c3` and `18d89b7`. All commands and expected results below are future verification instructions, not claims of completed checks.
 
 ## Global Constraints
 
