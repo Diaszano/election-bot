@@ -15,9 +15,9 @@ type Attempt struct {
 }
 
 type Acceptance struct {
-	Ref        MessageRef
-	Operation  Operation
-	AcceptedAt time.Time
+	Ref                        MessageRef
+	Operation                  Operation
+	AcceptedAt, NextOutboundAt time.Time
 }
 
 type ChannelState struct {

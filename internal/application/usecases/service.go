@@ -440,7 +440,7 @@ func (s *Service) refreshFreshness(ctx context.Context) error {
 		if e = tx.SetStatus(st); e != nil {
 			return e
 		}
-		subs, e := tx.Subscriptions()
+		subs, e := tx.SubscriptionsFor(latest.Snapshot.Identity, "")
 		if e != nil {
 			return e
 		}

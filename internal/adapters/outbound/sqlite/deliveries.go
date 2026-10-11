@@ -175,6 +175,11 @@ func (s *Store) CompleteAttempt(ctx context.Context, d notification.Delivery, a 
 		if acceptedAt.IsZero() {
 			acceptedAt = time.Now().UTC()
 		}
+		if !accepted.NextOutboundAt.IsZero() {
+			if _, err = t.tx.ExecContext(ctx, `UPDATE subscriptions SET next_outbound_at=? WHERE id=? AND generation=? AND active=1`, accepted.NextOutboundAt.UnixNano(), sid, a.Generation); err != nil {
+				return err
+			}
+		}
 		res, err := t.tx.ExecContext(ctx, `UPDATE delivery_attempts SET accepted_at=?,outcome='accepted' WHERE id=? AND outbox_id=? AND generation=? AND operation=? AND request_id=? AND revision=? AND text=?`, acceptedAt.UnixNano(), a.ID, d.ID, a.Generation, a.Operation, a.RequestID, a.Revision, a.Text)
 		if err != nil {
 			return err
