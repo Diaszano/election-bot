@@ -4,7 +4,7 @@
 - Project: election-bot
 - Go module: `github.com/Diaszano/election-bot`
 - Branch: `ci/github-actions-release-pipeline`
-- Status: Specification submitted for review. Authorizes no implementation or remote changes by itself.
+- Status: Specification approved with final refinements incorporated; implementation plan preparation authorized.
 
 ---
 
@@ -92,14 +92,19 @@ The entrypoint in `cmd/election-bot/main.go` parses the `version` subcommand:
 
 ## 3. Semantic Versioning & Release Please Orchestration
 
-### 3.1 Semantic Versioning 2.0.0 Policy
+### 3.1 Semantic Versioning 2.0.0 Policy & Initial Bootstrap
 - Version tags use conventional lowercase `v`: e.g. `v0.1.0`, `v0.2.0`, `v1.0.0`.
-- Release increments follow Conventional Commits:
+- Release increments follow Conventional Commits 1.0.0:
   - `fix:` → PATCH increment.
   - `feat:` → MINOR increment.
-  - `BREAKING CHANGE:` or `!` in type/scope → MAJOR increment (or MINOR bump during `0.y.z` initial development per SemVer specification).
-  - `docs:`, `test:`, `ci:`, `chore:`, `refactor:`, `style:`, `perf:` → No version bump by default unless explicitly tagged.
-- **Initial Planned Version**: `v0.1.0`. The project remains in `0.y.z` status while official TSE EA20 presidential runoff contracts and real WhatsApp account pairing/delivery remain in offline simulation mode. Promotion to `v1.0.0` requires prior verified live-account smoke tests and official contract verification.
+  - `perf:` → PATCH increment.
+  - `refactor:`, `style:`, `test:`, `build:`, `ci:`, `chore:`, `docs:` → No version bump by default unless breaking.
+  - `BREAKING CHANGE:` or `!` in type/scope → In `0.y.z` (pre-1.0), breaking changes bump MINOR (per SemVer 2.0.0 item 4, initial development where any change may introduce breaking behavior), while in `>= 1.0.0` they bump MAJOR.
+- **Initial Release Bootstrap**:
+  - The first planned release is strictly **`v0.1.0`**.
+  - In Release Please, setting `.release-please-manifest.json` alone to `0.1.0` without established release history could lead Release Please to parse all past conventional commits (including multiple `feat:` commits) and propose `0.2.0` or higher immediately.
+  - To deterministically pin the first release to `v0.1.0`, configure `bootstrap-sha` in `release-please-config.json` referencing the merge commit of the initial release baseline, or initialize `.release-please-manifest.json` with `"0.0.0"` and an initial feature commit so that Release Please calculates the next release as exactly `0.1.0`.
+  - Include an executable unit test / dry-run validator in `cmd/dev-check` verifying that Release Please configuration and manifest calculate the expected initial release `v0.1.0`.
 
 ### 3.2 Configuration Files
 1. `release-please-config.json`:
@@ -126,20 +131,28 @@ The entrypoint in `cmd/election-bot/main.go` parses the `version` subcommand:
    }
    ```
 
-### 3.3 Self-Contained Release & Publishing Orchestration
-To solve the critical limitation where standard `GITHUB_TOKEN` actions cannot trigger secondary workflows upon tag creation, the release process is defined as a self-contained pipeline in `.github/workflows/release.yml`:
+### 3.3 Release PR CI Execution with `GITHUB_TOKEN`
+- Release PRs opened by Release Please using the default `GITHUB_TOKEN` do not automatically trigger GitHub Actions workflows in some repository permission configurations.
+- **Workflow & Branch Protection Resolution**:
+  - The CI workflow (`.github/workflows/ci.yml`) is explicitly configured to run on `pull_request` events targeting `main`.
+  - When Release Please opens or updates a Release PR (`chore(main): release 0.1.0`), maintainers can trigger the required CI checks via a manual workflow dispatch or by adding a PR trigger comment/label, or maintainers approve and run checks through GitHub's standard PR action controls.
+  - GitHub Rulesets require status checks to pass before merging. Document in `docs/ci-cd.md` the exact maintainer review and check-approval steps so that Release PRs are never blocked in an unmergeable state.
+  - A GitHub App or Personal Access Token is **not required initially** and will not be introduced unless authorized.
+
+### 3.4 Self-Contained Release & Publishing Orchestration
 
 ```mermaid
 flowchart TD
     Merge[PR merged to main] --> RP[Job 1: Release Please with GITHUB_TOKEN]
     RP --> CheckRelease{Release Created?}
     CheckRelease -- No (Update/Create PR) --> End[Release PR open or updated]
-    CheckRelease -- Yes (Release Merged & Tagged) --> Verify[Job 2: Verify Strict CI Validation on Tag Commit]
+    CheckRelease -- Yes (Release Merged & Tagged) --> Verify[Job 2: Verify Exact Release Commit SHA]
     Verify --> BuildBinaries[Job 3: Multi-Platform Go Binaries]
-    Verify --> BuildDocker[Job 4: Multi-Arch Docker Build & Push to GHCR]
-    BuildBinaries --> Attest[Job 5: GitHub Artifact Attestation & SBOM]
+    Verify --> ScanTrivy[Job 4: Container Security Scan with Trivy]
+    ScanTrivy --> BuildDocker[Job 5: Multi-Arch Docker Build & Push to GHCR]
+    BuildBinaries --> Attest[Job 6: GitHub Artifact Attestation & SBOM]
     BuildDocker --> Attest
-    Attest --> PublishAssets[Job 6: Attach Binaries & SBOM to GitHub Release]
+    Attest --> PublishAssets[Job 7: Attach Binaries & SBOM to GitHub Release]
 ```
 
 #### Steps:
@@ -148,30 +161,47 @@ flowchart TD
 3. Upon human maintainer approval and merge to `main`:
    - Release Please generates the Git tag `v0.1.0` and creates the GitHub Release entry.
    - Outputs `release_created: true`, `tag_name: v0.1.0`, and `sha`.
-4. The dependent job `verify-ci` verifies that the exact commit SHA has passed mandatory CI checks before any build or artifact publication proceeds.
-5. `publish-ghcr` builds and publishes multi-architecture images (`linux/amd64`, `linux/arm64`) to `ghcr.io/diaszano/election-bot`.
-6. `publish-release-assets` generates binary archives (`election-bot-linux-amd64.tar.gz`, `election-bot-linux-arm64.tar.gz`), generates SPDX/CycloneDX SBOMs, and uploads them to the GitHub Release.
-7. Generates cryptographic build provenance using `actions/attest-build-provenance`.
+4. **Exact Commit Verification**:
+   - The downstream release jobs explicitly checkout the commit SHA output by Release Please (`steps.release.outputs.sha`), rather than assuming `github.sha` or `refs/heads/main` HEAD.
+   - Job `verify-release-commit` verifies that this exact commit SHA has passed all mandatory CI checks (`standards`, `go-quality`, `security`, `docker-validation`) via the GitHub API before any build or publishing step begins.
+   - If CI checks for that exact SHA have not passed or are missing, release publishing aborts immediately.
+5. **Vulnerability Gate**: Runs Trivy container security scanner on the built release image. Any unexempted `CRITICAL` vulnerability halts publishing.
+6. `publish-ghcr` builds and publishes multi-architecture images (`linux/amd64`, `linux/arm64`) to `ghcr.io/diaszano/election-bot`.
+7. `publish-release-assets` cross-compiles static binaries (`election-bot-linux-amd64.tar.gz`, `election-bot-linux-arm64.tar.gz`), generates SPDX SBOMs, and uploads them to the GitHub Release.
+8. Generates cryptographic build provenance using `actions/attest-build-provenance`.
 
-#### Idempotency & Failure Recovery:
-- If a downstream job fails (e.g. transient GHCR network timeout), re-running the workflow or triggering it via `workflow_dispatch` (with the tag name) checks existing assets before attempting build and push.
-- Existing immutable Git tags and GHCR digests are never overwritten. If an image tag already exists with matching digest, the step logs idempotency and continues.
+### 3.5 Release Failure Recovery & Idempotency
+- If release creation succeeds (tag and release created) but downstream publishing fails (e.g. transient network timeout or registry error):
+  - Do NOT recreate or move the Git tag.
+  - Provide a dedicated, manual workflow dispatch option in `.github/workflows/release.yml`: `workflow_dispatch` with input `recovery_tag: vX.Y.Z`.
+  - The recovery job verifies:
+    1. The tag exists and points to an immutable commit SHA.
+    2. The commit SHA has passed all mandatory CI checks.
+    3. Existing assets on GitHub Release and tags in GHCR:
+       - If an immutable tag (`v0.1.0`, `0.1.0`) already exists on GHCR with matching digest, it logs idempotency and does not overwrite it.
+       - If release binary assets exist on GitHub Release, verify checksums; do not overwrite differing binaries.
+       - Missing assets (Docker images, binaries, SBOM, provenance) are built and uploaded.
+- Under no circumstances does recovery or re-running a workflow overwrite an existing immutable version tag with different content.
 
 ---
 
 ## 4. Native Go Validation Tool: `cmd/dev-check`
 
-To avoid introducing Node.js, `npm`, or `package.json` into a pure Go project, commit and branch validation is implemented natively as a self-contained, compiled tool in `cmd/dev-check/`.
+Commit and branch validation is implemented as a self-contained, compiled Go CLI tool in `cmd/dev-check/`.
 
 ### 4.1 CLI Interface & Subcommands
 1. `dev-check commit [message-file | --msg "message"]`:
    - Enforces Conventional Commits 1.0.0.
    - Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`.
    - Syntax: `<type>[optional scope][!]: <description>`.
+   - Scope must be alphanumeric with optional hyphens/underscores.
    - Description must be lowercase, non-empty, and free of trailing punctuation in the header.
-   - Enforces empty line between header and body/footer.
-   - Breaking changes require either `!` after type/scope or `BREAKING CHANGE: <explanation>` in the footer.
-   - Exemptions: Merge commits (`Merge branch ...`, `Merge pull request ...`, `Merge made by the ... strategy`) and automated Release Please commits (`chore(main): release ...`).
+   - Enforces empty line between header and body/footer if body/footer are present.
+   - Breaking changes require either `!` after type/scope or a footer starting with `BREAKING CHANGE: <explanation>`.
+   - **Pre-1.0 and Historical Compatibility**:
+     - Enforces Conventional Commits on all *newly introduced* PR commits (`git log origin/main..HEAD`).
+     - Historical commits that existed prior to introducing this policy are not retroactively failed.
+     - Exemptions: Merge commits (`Merge branch ...`, `Merge pull request ...`, `Merge made by the ... strategy`) and automated Release Please commits (`chore(main): release ...`).
 2. `dev-check branch [branch-name]`:
    - Enforces branch naming convention: `<type>/<short-kebab-case-description>`.
    - Allowed prefixes: `feat/`, `fix/`, `docs/`, `style/`, `refactor/`, `perf/`, `test/`, `build/`, `ci/`, `chore/`, `hotfix/`.
@@ -180,11 +210,13 @@ To avoid introducing Node.js, `npm`, or `package.json` into a pure Go project, c
    - Exemptions: `main`, `master`, `release-please--*`, `dependabot/*`.
 3. `dev-check pr-title [title]`:
    - Validates that pull request titles adhere to Conventional Commits 1.0.0.
+4. `dev-check release-config`:
+   - Validates `release-please-config.json` and `.release-please-manifest.json` consistency, verifying that the configured package and initial release target match `v0.1.0`.
 
 ### 4.2 Local Git Hooks & Makefile Integration
-- `make check`: Runs `go run ./cmd/dev-check branch` and validates local commit history.
+- `make check`: Runs `dev-check branch` and validates current branch commits.
 - `make git-hooks`: Installs an optional `.git/hooks/commit-msg` hook that invokes `dev-check commit "$1"`.
-- Table-driven unit tests in `cmd/dev-check/main_test.go` cover valid, invalid, boundary, breaking change, and exempt commit messages and branch names.
+- Table-driven unit tests in `cmd/dev-check/main_test.go` cover all valid, invalid, breaking change, and exempt commit messages and branch names.
 
 ---
 
@@ -218,6 +250,7 @@ Runs on:
 4. `docker-validation`:
    - Sets up Docker Buildx.
    - Builds container image for `linux/amd64` (and tests multi-platform buildability).
+   - Scans built image with Trivy (`aquasecurity/trivy-action`), blocking on unexempted `CRITICAL` vulnerabilities.
    - Runs container smoke test in `DATA_SOURCE_MODE=simulation`:
      - Verifies non-root execution (UID 65532).
      - Verifies startup with `WHATSAPP_ENABLED=false` preserves Telegram listener and returns HTTP 200 on `/health/ready`.
@@ -228,7 +261,7 @@ Runs on:
 ### 5.2 Release Pipeline: `.github/workflows/release.yml`
 Runs on:
 - Pushes to `main`
-- `workflow_dispatch`
+- `workflow_dispatch` (with optional `recovery_tag` input)
 
 #### Jobs:
 1. `release-please`:
@@ -236,22 +269,23 @@ Runs on:
    - Creates or updates Release PRs.
    - Creates Git tags and GitHub Releases upon merge.
    - Outputs: `release_created`, `tag_name`, `sha`.
-2. `publish-ghcr`:
-   - Conditional on `needs.release-please.outputs.release_created == 'true'`.
+2. `verify-release-commit`:
+   - Resolves target SHA: `steps.release.outputs.sha` (or SHA of `inputs.recovery_tag`).
+   - Queries GitHub Checks API to verify all mandatory CI jobs (`standards`, `go-quality`, `security`, `docker-validation`) have passed on that exact SHA.
+   - Fails closed if checks are missing or failed.
+3. `publish-ghcr`:
+   - Depends on `verify-release-commit`.
    - Permissions: `packages: write`, `contents: read`, `id-token: write`, `attestations: write`.
    - Sets up QEMU and Docker Buildx.
    - Logs into `ghcr.io` using `secrets.GITHUB_TOKEN`.
-   - Generates OCI metadata and tags via `docker/metadata-action`:
-     - `ghcr.io/diaszano/election-bot:v0.1.0`
-     - `ghcr.io/diaszano/election-bot:0.1.0`
-     - `ghcr.io/diaszano/election-bot:0.1`
-     - `latest` assigned ONLY if it is a stable release >= 1.0.0 and not a pre-release.
+   - Generates OCI metadata and tags via `docker/metadata-action`.
+   - Scans with Trivy before push; blocks on `CRITICAL` vulnerabilities.
    - Builds and pushes multi-architecture image for `linux/amd64,linux/arm64`.
-   - Generates and attaches SBOM using `anchore/sbom-action`.
+   - Generates and attaches SPDX SBOM using `anchore/sbom-action`.
    - Generates build provenance using `actions/attest-build-provenance`.
-3. `publish-release-assets`:
-   - Conditional on `needs.release-please.outputs.release_created == 'true'`.
-   - Builds cross-compiled static binaries: `linux/amd64`, `linux/arm64`.
+4. `publish-release-assets`:
+   - Depends on `verify-release-commit`.
+   - Cross-compiles static binaries: `linux/amd64`, `linux/arm64`.
    - Creates `.tar.gz` archives with SHA256 checksums (`checksums.txt`).
    - Attaches binary archives, checksums, and SBOM to the GitHub Release via `gh release upload`.
 
@@ -263,42 +297,60 @@ Runs on:
 - `linux/amd64`
 - `linux/arm64`
 
-### 6.2 OCI Labels & Metadata
-Standard annotations configured via `docker/metadata-action`:
-- `org.opencontainers.image.title=election-bot`
-- `org.opencontainers.image.description=Persistent, observable election results bot for Brazil's presidential runoff (Telegram & WhatsApp)`
-- `org.opencontainers.image.url=https://github.com/Diaszano/election-bot`
-- `org.opencontainers.image.source=https://github.com/Diaszano/election-bot`
-- `org.opencontainers.image.version=${{ steps.meta.outputs.version }}`
-- `org.opencontainers.image.revision=${{ github.sha }}`
-- `org.opencontainers.image.licenses=MIT`
+### 6.2 Image Tag Policy: Immutable Tags vs. Moving Aliases
+1. **Immutable Version Tags**:
+   - `ghcr.io/diaszano/election-bot:v0.1.0`
+   - `ghcr.io/diaszano/election-bot:0.1.0`
+   - *Policy*: Once pushed, immutable tags represent a permanent snapshot of that exact release. They must never be updated with differing image layers.
+2. **Moving Aliases**:
+   - `ghcr.io/diaszano/election-bot:0.1` (tracks latest patch in minor series 0.1)
+   - `ghcr.io/diaszano/election-bot:1` (tracks latest in major series 1)
+   - `ghcr.io/diaszano/election-bot:latest` (tracks latest stable release `>= 1.0.0`; NEVER assigned to `0.y.z` or pre-releases)
+3. **Development Images**:
+   - Pushes to `main` (outside release tags) may publish development images tagged `main-<short-sha>`:
+     - `ghcr.io/diaszano/election-bot:main-a1b2c3d`
+   - Development images are never tagged with SemVer tags or `latest`.
+4. **Production Recommendation**:
+   - Production runbooks strictly recommend deploying via immutable container digest:
+     `ghcr.io/diaszano/election-bot@sha256:<digest>`
 
-### 6.3 Tagging Rules & Immutability
-- Releases < `1.0.0` (e.g. `v0.1.0`): Tagged with `0.1.0`, `v0.1.0`, `0.1`. Never tagged with `latest`.
-- Releases >= `1.0.0` (e.g. `v1.0.0`): Tagged with `1.0.0`, `v1.0.0`, `1.0`, `1`, `latest`.
-- Development images from `main`: Tagged with `main-<short-sha>`.
-- Production guidance: Operator runbooks recommend deploying via immutable digest (`ghcr.io/diaszano/election-bot@sha256:...`) rather than mutable tags.
+### 6.3 OCI Metadata & License Verification
+- The repository does not currently include a root `LICENSE` file.
+- **License Policy**: Do NOT declare `MIT` or any other license in OCI annotations or manifests until an official project license has been formally established and added to the repository. The OCI annotation `org.opencontainers.image.licenses` will remain unset or empty until a license is adopted.
+- Other annotations:
+  - `org.opencontainers.image.title=election-bot`
+  - `org.opencontainers.image.description=Persistent, observable election results bot for Brazil's presidential runoff (Telegram & WhatsApp)`
+  - `org.opencontainers.image.url=https://github.com/Diaszano/election-bot`
+  - `org.opencontainers.image.source=https://github.com/Diaszano/election-bot`
+  - `org.opencontainers.image.version=${{ steps.meta.outputs.version }}`
+  - `org.opencontainers.image.revision=${{ steps.meta.outputs.revision }}`
 
 ---
 
 ## 7. Software Supply Chain Security
 
 ### 7.1 Least Privilege & Workflow Hardening
-- All workflow files specify top-level `permissions: contents: read` by default.
-- Elevated permissions (`packages: write`, `id-token: write`, `attestations: write`) are granted strictly to isolated publishing jobs.
-- All third-party GitHub Actions are pinned to full commit SHAs with inline version tags for auditability (e.g. `actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2`).
-- `pull_request_target` is strictly avoided to protect secrets from untrusted PR code.
-- Workflow timeouts are explicitly configured on all jobs (e.g. `timeout-minutes: 15`).
-- Concurrency groups cancel obsolete PR builds without canceling active releases:
-  ```yaml
-  concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-  ```
+- Top-level `permissions: contents: read` across all workflows.
+- Elevated permissions (`packages: write`, `id-token: write`, `attestations: write`) restricted to release publish jobs.
+- Third-party GitHub Actions pinned to full commit SHAs with inline version comments:
+  - `actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2`
+  - `actions/setup-go@3041bf56c941b39ced0dd963f76101bdd2d16460 # v5.3.0`
+  - `docker/setup-buildx-action@c47758b77c9736f4b4e2b0265fb2f224fa37f618 # v3.8.0`
+  - `docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0`
+  - `docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0`
+  - `docker/metadata-action@369eb591f429131d688f8d6b7f4d15e85c29ca5b # v5.7.0`
+  - `aquasecurity/trivy-action@18f2510ee396bbf400402947b394f2dd8c87dbb0 # v0.29.0`
+  - `anchore/sbom-action@fc6a014e7a2b9f62c8fb6a5ca45318b849319e7f # v0.17.9`
+  - `actions/attest-build-provenance@c074443f1a5fb4aee83904b7124879ae09f19383 # v2.2.2`
+- `pull_request_target` is strictly forbidden.
+- Explicit job timeouts (`timeout-minutes: 15`).
+- Concurrency control cancelling obsolete PR builds while protecting release jobs.
 
-### 7.2 SBOM & Provenance
-- Release artifacts generate an SPDX Software Bill of Materials (SBOM) using `anchore/sbom-action`.
-- GitHub native artifact attestations (`actions/attest-build-provenance`) cryptographically sign build outputs and container images using Sigstore/OIDC.
+### 7.2 Container Security & Vulnerability Policy
+- Scans container images with Trivy.
+- Failure threshold: `CRITICAL` vulnerabilities cause the build to fail.
+- `HIGH` vulnerabilities are logged and summarized in the job summary.
+- Any vulnerability exception must be explicitly documented in `.trivyignore` with CVE identifier, package name, rationale, and review expiration date.
 
 ### 7.3 Automated Dependency Updates: `.github/dependabot.yml`
 Configure Dependabot for:
@@ -319,7 +371,7 @@ Configure Dependabot for:
 Create or update:
 - `.editorconfig`: Enforce 2-space indentation for YAML/Markdown, tabs for Go, UTF-8, and newline termination.
 - `.gitattributes`: Enforce LF line endings for text/code, binary handling for SQLite databases.
-- `.github/CODEOWNERS`: Assign repository maintainers.
+- `.github/CODEOWNERS`: Assign repository maintainers (`@Diaszano`).
 - `.github/dependabot.yml`: Automated dependency monitoring.
 - `.github/PULL_REQUEST_TEMPLATE.md`: Standardized PR checklist (Conventional Commit title, test evidence, no secrets, fail-closed runoff verification).
 - `.github/ISSUE_TEMPLATE/`: Bug report and feature request templates.
@@ -332,7 +384,7 @@ Update `Makefile` to provide comprehensive developer convenience:
 - `make check`: Runs branch, commit, and formatting validation via `dev-check`.
 - `make ci`: Runs full local CI sequence (`go mod verify`, `go vet`, `make lint`, `test-race`, `simulate`, `CGO_ENABLED=0 go build`).
 - `make version`: Displays version info via `go run ./cmd/election-bot version`.
-- `make release-check`: Dry-run validation of Release Please configuration and manifest.
+- `make release-check`: Dry-run validation of Release Please configuration and manifest via `dev-check release-config`.
 
 ---
 
@@ -359,14 +411,14 @@ Document the required repository ruleset configuration for `main` in `docs/ci-cd
 
 ### 10.1 Automated Local Validation
 Before completing implementation:
-1. `go test -v ./cmd/dev-check/...`: Verify all Conventional Commit and branch naming rule cases.
+1. `go test -v ./cmd/dev-check/...`: Verify all Conventional Commit, branch naming, and release-config cases.
 2. `go test -race ./...`: Verify that version package integration does not break any domain, application, or adapter tests.
 3. `make lint`: Verify `golangci-lint` passes with zero issues.
 4. `make simulate`: Verify offline recovery simulation passes.
 5. `CGO_ENABLED=0 go build -ldflags="-X 'github.com/Diaszano/election-bot/internal/platform/version.Version=v0.1.0' -X 'github.com/Diaszano/election-bot/internal/platform/version.Commit=testsha'" -o /tmp/election-bot ./cmd/election-bot`:
    - Run `/tmp/election-bot version` and `/tmp/election-bot version --json`, asserting expected outputs.
 6. `docker build -t election-bot:test .` and verify non-root startup and `/health/ready`.
-7. Dry-run `release-please` config validation.
+7. Dry-run `release-please` config validation via `dev-check release-config`.
 8. Validate workflow YAML files with formatting and schema checkers.
 
 ### 10.2 Ledger Documentation
@@ -376,6 +428,6 @@ Maintain `docs/validation.md` recording all executed local validation checks, ex
 
 ## 11. Review Gate and Handoff
 
-This specification documents the complete CI/CD, SemVer, Docker publishing, and repository standards architecture.
+This specification documents the complete CI/CD, SemVer, Docker publishing, and repository standards architecture with all required refinements.
 Upon approval of this specification, implementation planning will proceed using `superpowers:writing-plans`.
 No production code, workflow configurations, or dependencies will be created until the implementation plan is presented and approved.
