@@ -46,7 +46,7 @@ At this pin, the supported interfaces include:
 | --- | --- |
 | SQL container | `sqlstore.New(ctx, dialect, address, logger)` or `sqlstore.NewWithDB(db, dialect, logger)` |
 | Controlled SQL pool | `NewWithDB`, then `Container.Upgrade(ctx)` |
-| Persisted device | `Container.GetFirstDevice(ctx)` |
+| Persisted device selection | `Container.GetAllDevices(ctx)`; reject more than one device before selection |
 | Client | `whatsmeow.NewClient(deviceStore, logger)` |
 | QR pairing | `Client.GetQRChannel(ctx)` before connection when the device has no ID |
 | Connection | `Client.ConnectContext(ctx)`, `Client.Disconnect()`, `Client.Logout(ctx)` |
@@ -129,7 +129,8 @@ Create `migrations/002_channel_notifications.sql`; do not edit migration 001. Ex
 | Table | Required version-2 state |
 | --- | --- |
 | `subscriptions` | Internal primary key; unique `(election_key, channel, recipient)`; active flag, generation, milestone baseline, existing preferences; string main message ID; original send time, last edit time, last summary time; last accepted semantic/presentation revisions; edit-unavailable flag for the current main reference |
-| `outbox` | Preserve existing job IDs; subscription foreign key and generation; kind, event key, milestone, revision, text; original pending creation time for new jobs; due time, retry-not-before, attempts, state, sanitized last error; stable transport request ID for WhatsApp sends |
+| `outbox` | Preserve existing job IDs; subscription foreign key and generation; kind, event key, milestone, revision, text; original pending creation time for new jobs; due time, retry-not-before, attempts, state, sanitized last error; stable transport request ID for WhatsApp sends, linked to immutable attempt metadata |
+| `delivery_attempts` | Job, generation, operation, immutable revision/payload reference, stable request ID, preparation/acceptance timestamps and classified outcome; unique request IDs, no credentials |
 | `inbound_commands` | Unique `(channel, recipient, incoming_message_id)`; election/subscription linkage, normalized command and received timestamp; no raw inbound text |
 | `subscription_audit` | Subscription linkage, generation, opt-in/opt-out command, incoming message reference and timestamp |
 | `channel_state` | Private account binding, persistent authentication-required/pause state, and global outbound cooldown recovery metadata |
@@ -138,6 +139,16 @@ Create `migrations/002_channel_notifications.sql`; do not edit migration 001. Ex
 Channel is obtained from the subscription relationship when querying outbox work; do not maintain a second contradictory channel identity on a job. Main jobs use event key `main`; milestone jobs use `milestone:<threshold>`; command replies use `command:<incoming-message-id>`. Enforce unique `(subscription_id, kind, event_key)`.
 
 Milestone uniqueness excludes subscription generation so a percentage correction or stop/start cycle cannot recreate a historical alert. Generations still prevent delivery to an obsolete subscription lifecycle. Keep canceled and accepted milestone records as history. Baselines prevent historical alerts for new subscribers.
+
+### Legacy constraint compatibility
+
+Schema 1 enforces `UNIQUE(chat, kind, milestone)`. Existing producers create main jobs with milestone zero and milestone jobs with their distinct thresholds, so their natural mapping is collision-free. The schema does not, however, forbid atypical main rows with different milestone values: collapsing those all to event key `main` would collide. Do not assume producer conventions are a database constraint.
+
+During migration, group source rows by their proposed `(subscription_id, kind, event_key)`. For a colliding main group choose the milestone-zero row as the canonical `main` row if present, otherwise the smallest original job ID. Give every other row a deterministic reserved event key `legacy:<original-job-id>`. Reserve this namespace from new producers. Preserve each row's original kind, milestone, ID, generation, payload, scheduling, retry and delivery history. Apply the same smallest-ID/reserved-key rule to any other mapped collision, without merging state or choosing a delivered row over pending work. Unknown legacy kinds receive reserved keys and remain retained for explicit classification; they are not silently converted into supported automatic sends.
+
+Imported supported pending jobs with reserved keys remain independently dispatchable, subject to the same generation and authorization checks, in original job-ID order. They are not overwritten by future canonical main upserts, and acknowledging one cannot complete another. Historical rows remain queryable with their preserved keys and fields. Invalid source constraints or orphaned references fail the transaction rather than fabricating repairs. Preflight mapping and post-copy uniqueness checks use the same deterministic mapping function.
+
+Compatibility verification consists of the checked-in schema/producers analysis above and populated-schema tests, including deliberately atypical but schema-valid colliding rows. No deployed operator database has been inspected; its records must undergo this preflight before upgrade.
 
 The legacy `delivered` outbox state means transport acceptance, not a verified device delivery/read receipt. Preserve existing terminal states and error text during migration; write only sanitized classifications for new WhatsApp failures. Retry-exhausted jobs remain durable and visible as failed work, rather than being deleted or counted as accepted. Authentication/connection suspension keeps jobs pending with a durable future eligibility time.
 
@@ -159,7 +170,7 @@ On ordinary restart, recover pending jobs, message references, timestamps, coold
 
 ## 7. WhatsApp session lifecycle and security
 
-Store device credentials in a separate `WHATSAPP_SESSION_DB_PATH`, default `/data/whatsapp-session.db`. Open a controlled `database/sql` pool with the existing pure-Go SQLite driver, foreign keys enabled on every connection, WAL, a bounded busy timeout, full synchronous durability, and one connection. Run sqlstore's supported upgrades and restore the saved device. Do not create a new session each startup. Reject an ambiguous multiple-device store rather than selecting an account silently.
+Store device credentials in a separate `WHATSAPP_SESSION_DB_PATH`, default `/data/whatsapp-session.db`. Open a controlled `database/sql` pool with the existing pure-Go SQLite driver, foreign keys enabled on every connection, WAL, a bounded busy timeout, full synchronous durability, and one connection. Run sqlstore's supported upgrades, then explicitly call `GetAllDevices(ctx)` before selecting any session: zero devices permits creation of one new unpaired device; exactly one restores that device; more than one fails closed as an ambiguous store. Do not rely on `GetFirstDevice()` to choose an account, and do not create a new session each startup.
 
 Protect the session database, WAL/SHM files, and lock file with owner-only permissions and a restrictive creation umask. Protect backups equivalently. Exclude these files and generated session artifacts from Git and Docker build contexts. Never export internal SQL/device errors containing keys or identities.
 
@@ -201,7 +212,7 @@ For WhatsApp:
 2. Coalesce pending main changes to the newest accepted desired revision. Do not reset retry or cooldown deadlines on every poll.
 3. Edit only when a current message reference exists, editing has not failed permanently, its original send age is **less than 14 minutes**, and the configured minimum edit interval has elapsed.
 4. An edit updates last-edit time and accepted revision, never original-send time. At exactly 14 minutes editing is forbidden.
-5. When editing is unavailable, send a new summary only if meaningful election results differ from the last accepted summary and the configured digest interval has elapsed. Replace the main reference and reset its original-send anchor only after successful new send acceptance.
+5. When editing is unavailable, send a new summary only if meaningful election results have changed, the desired presentation revision differs from the latest successfully accepted presentation revision (whether accepted by a send or an edit), and the configured digest interval has elapsed. Successful edits update that accepted revision, so content already delivered by an edit cannot generate a redundant digest when its edit window expires. Replace the main reference and reset its original-send anchor only after successful new send acceptance.
 6. Freshness-only changes may edit an eligible message but cannot create repeated digest messages for unchanged election data. Keep unsent desired presentation state pending/coalesced; `!agora` and `!status` always expose current freshness.
 
 Use a conservative persisted original-send anchor: local send-start time, or an earlier valid server timestamp if supplied. Never let a future/invalid timestamp or a later edit extend the edit window. If the current clock is earlier than the original send or last recorded successful delivery/edit, defer editing and report the clock anomaly rather than granting additional edit time.
@@ -214,7 +225,7 @@ Milestone alerts are separate WhatsApp messages at 25%, 50%, 75%, 90%, 95%, and 
 
 Explicit command replies likewise bypass digest batching. All outbound traffic shares channel pacing. Default per-recipient minimum interval is 3 seconds and proposed global minimum interval is 1 second. Persist cooldown eligibility across restart; deferred work does not consume a transport retry or count as a failure. Process bounded batches without bursts or starvation of other recipients.
 
-A send uses a stable persisted transport request ID where supported by `SendRequestExtra.ID`, but this is best-effort deduplication, not an exactly-once guarantee. Send acceptance is acknowledged durably only after the API returns successfully. Receipt events do not change accepted work into confirmed delivery/read without a separately verified state model; that extension is outside this feature.
+Before the first remote attempt, allocate and commit a stable WhatsApp request ID to the durable outbox attempt in a short SQLite transaction. Only then call `SendMessage` with `SendRequestExtra.ID`. Reuse that ID for retries of the same recipient, subscription generation, operation, and immutable payload revision, including after restart. A changed payload/revision, replacement summary, or distinct edit requires a new request ID committed before its attempt; retain the prior attempt metadata so ambiguous acceptance remains auditable. A mutable coalesced main job must not reuse an old request ID for different content. This is best-effort deduplication, not an exactly-once guarantee. Send acceptance is acknowledged durably only after the API returns successfully. Receipt events do not change accepted work into confirmed delivery/read without a separately verified state model; that extension is outside this feature.
 
 Temporary disconnection/authentication suspension retains pending jobs without exhausting send attempts. Actual transient network failures use bounded exponential backoff with jitter and durable scheduling. After retry exhaustion keep the failed row, reason, and desired work visible for explicit recovery. Permanent invalid-recipient failures are channel-local and audited; never affect a Telegram subscription for that person. An operator can requeue retained failed work after fixing the cause without recreating milestone history.
 
@@ -284,17 +295,17 @@ Test channel-aware identity isolation; independent opt-in/opt-out; active repeat
 
 With a fake clock, test 60-second edit spacing, the exact 14-minute boundary, original-send anchoring after repeated edits, invalid/future timestamps and clock rollback, 15-minute digest behavior, coalescing without retry/cooldown starvation, freshness-only changes, explicit replies, and visible edit failure fallback.
 
-Test generation and revision guards on successful, retry, and terminal outcomes. Block a fake WhatsApp send and prove Telegram sends and TSE processing still complete. Verify per-recipient serialization, independent channel limits, durable cooldown/retry state, no network call under a transaction, and cancellation.
+Test generation and revision guards on successful, retry, and terminal outcomes. Assert edit-accepted content cannot later generate a duplicate digest; assert request IDs are committed before network calls, reused for identical retries after restart, and replaced for changed content without losing prior attempt metadata. Block a fake WhatsApp send and prove Telegram sends and TSE processing still complete. Verify per-recipient serialization, independent channel limits, durable cooldown/retry state, no network call under a transaction, and cancellation.
 
 ### SQLite migration and recovery
 
-Populate schema 1 with active/inactive Telegram subscriptions, multiple generations, large numeric identifiers, preferences, main message IDs, pending/accepted/canceled/failed jobs, retries and precise timestamps, snapshot validators, monitoring state, and Telegram offset. Assert complete preservation after migration and reopen. Inject DDL/copy failures and prove rollback restores a readable unchanged prior schema. Test consistent backup restoration with the old repository, unknown future-version rejection, constraints, and migration idempotency. Existing migration bytes remain unchanged.
+Populate schema 1 with active/inactive Telegram subscriptions, multiple generations, large numeric identifiers, preferences, main message IDs, pending/accepted/canceled/failed jobs, retries and precise timestamps, snapshot validators, monitoring state, and Telegram offset. Assert complete preservation after migration and reopen. Inject DDL/copy failures and prove rollback restores a readable unchanged prior schema. Test consistent backup restoration with the old repository, unknown future-version rejection, constraints, and migration idempotency. Test collision-free conventional rows and colliding atypical main rows with mixed pending/history states, verifying deterministic reserved keys and independent pending work without row loss or overwrite. Existing migration bytes remain unchanged.
 
 ### WhatsApp adapter and session
 
 Use fakes and controlled event sources for persistent store restoration, new device setup, QR sequencing, connection transitions, bounded reconnect, revocation, restrictions, sends/edits, send acceptance versus receipts, and graceful shutdown. Test private PN/LID mapping, unresolved/conflicting mappings, allowlist removal, repeated stable command IDs, transaction failure, own/group/newsletter/history/edit rejection, and unrelated conversations.
 
-Test the real file lock with separate helper processes, path aliases, cancellation, and crash/release behavior. Test actual pure-Go SQL container upgrades, foreign keys, restrictive session permissions, and store reopening without real credentials or network pairing. Check sensitive sentinel phone/JID/message/QR/key values against captured logs, spans, and metrics, including adversarial SDK error text.
+Test zero, one, and multiple stored devices before selection; an ambiguous store must never connect or display a QR code. Test the real file lock with separate helper processes, path aliases, cancellation, and crash/release behavior. Test actual pure-Go SQL container upgrades, foreign keys, restrictive session permissions, and store reopening without real credentials or network pairing. Check sensitive sentinel phone/JID/message/QR/key values against captured logs, spans, and metrics, including adversarial SDK error text.
 
 ### End-to-end simulation and commands
 
