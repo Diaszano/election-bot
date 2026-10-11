@@ -218,10 +218,10 @@ Job `publish-ghcr` publishes multi-architecture images to GitHub Container Regis
   - **Minor Series Alias**: `0.1` (tracks latest patch in minor series).
   - **Major Series Alias**: `1` (for releases `>= 1.0.0`).
   - **`latest` Tag Policy**: Strictly reserved for releases `>= 1.0.0`. Pre-1.0 releases (`0.y.z`) NEVER receive the `latest` tag.
-- **Trivy Multi-Architecture Vulnerability Gate**:
+- **Trivy Multi-Architecture Vulnerability Gate & OCI Artifact Identity**:
   - Both target architectures (`linux/amd64` and `linux/arm64`) are independently built locally as candidate images (`election-bot:candidate-amd64` and `election-bot:candidate-arm64`) and scanned with Trivy.
   - Severity policy: `severity: CRITICAL` with `exit-code: 1`. Any unignored critical finding on either architecture immediately terminates the workflow and prevents publishing.
-  - Artifact identity: Both candidates are compiled from the exact verified commit SHA (`commit_sha`) using pinned base images (`golang:1.27.0-alpine3.21` and `gcr.io/distroless/static-debian12:nonroot`). The Buildx layer cache ensures that the published multi-arch manifest list references the identical compiled artifacts that underwent security scanning.
+  - *Artifact Identity Audit Note*: While candidate images are built from the verified release commit SHA using pinned base images and layer caches, Docker Buildx cache reuse alone does not constitute mathematical cryptographic proof of artifact identity between locally scanned candidates and the multi-architecture manifest published to GHCR. For strict supply chain compliance prior to production release, the workflow should transition to a digest-pinned pattern: *Build per architecture -> Record immutable digest -> Scan exact digest -> Assemble manifest by digests -> Attest and publish*.
 - **Software Bill of Materials (SBOM)**: Generated in SPDX JSON format using `anchore/sbom-action` and pushed to GHCR alongside the image.
 - **Cryptographic Attestation**: Build provenance is generated and signed using `actions/attest-build-provenance` via GitHub's Sigstore integration.
 

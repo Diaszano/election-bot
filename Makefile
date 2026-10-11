@@ -11,7 +11,7 @@ test-race:
 	go test -race ./...
 lint:
 	go vet ./...
-	@golangci-lint version | rg -q "version 2.13.2 "
+	@golangci-lint version | grep -q "version 2.13.2"
 	golangci-lint run
 fmt:
 	gofmt -w cmd internal migrations test
